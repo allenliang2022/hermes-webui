@@ -19,31 +19,48 @@ def test_active_session_external_refresh_uses_metadata_then_force_reload():
     assert "function ensureActiveSessionExternalRefreshPoll()" in SESSIONS_JS
     assert "async function refreshActiveSessionIfExternallyUpdated(reason)" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS
-    assert "if(remoteCount > localCount)" in SESSIONS_JS
-    assert "else if(remoteLast > localLast)" in SESSIONS_JS
+    assert "const localMsgLast = Number(S.session.last_message_at || 0);" in SESSIONS_JS
+    assert "const localUpdatedAt = Number(S.session.updated_at || 0);" in SESSIONS_JS
+    assert "const remoteMsgLast = Number(data.session.last_message_at || 0);" in SESSIONS_JS
+    assert "const remoteUpdatedAt = Number(data.session.updated_at || 0);" in SESSIONS_JS
+    assert "if(remoteCount !== localCount || remoteMsgLast !== localMsgLast)" in SESSIONS_JS
+    assert "else if(remoteUpdatedAt > localUpdatedAt)" in SESSIONS_JS
     assert "if(S.busy || S.activeStreamId) return;" in SESSIONS_JS
     assert "document.hidden" in SESSIONS_JS
     assert "externalRefreshReason:reason||'poll'" in SESSIONS_JS
 
 
-def test_active_session_external_refresh_skips_destructive_reload_on_metadata_only_bump():
-    """A timestamp-only active-session update should not blank the transcript.
+def test_active_session_external_refresh_uses_message_signals_not_updated_at_for_reload():
+    """Only real transcript changes should reload the visible conversation.
 
-    Background skill/memory review can update session timestamps without adding
-    chat messages. The old `remoteCount > localCount || remoteLast > localLast`
-    condition called `loadSession(..., {force:true})` for that metadata-only
-    bump; `loadSession(force)` clears S.messages before async message fetches,
-    so the whole transcript visibly disappeared and reappeared with no new
-    content. Only a higher message_count should force-reload the transcript;
-    timestamp-only bumps update local metadata and refresh the lightweight
-    sidebar list.
+    `last_message_at` is the message-change signal; `updated_at` can advance for
+    metadata-only writes such as background skill/memory review. Reloading the
+    whole transcript for updated_at-only bumps causes a visible blank/reappear
+    flash with no new content. Count changes in either direction and same-count
+    message timestamp changes still force-reload.
     """
     assert "remoteCount > localCount || remoteLast > localLast" not in SESSIONS_JS
-    assert "if(remoteCount > localCount){" in SESSIONS_JS
+    assert "remoteCount > localCount" not in SESSIONS_JS
+    assert "if(remoteCount !== localCount || remoteMsgLast !== localMsgLast){" in SESSIONS_JS
     assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in SESSIONS_JS
-    assert "}else if(remoteLast > localLast){" in SESSIONS_JS
-    assert "S.session.last_message_at = remoteLast" in SESSIONS_JS
-    assert "if(data.session.updated_at) S.session.updated_at = data.session.updated_at;" in SESSIONS_JS
+    assert "}else if(remoteUpdatedAt > localUpdatedAt){" in SESSIONS_JS
+    assert "S.session.updated_at = data.session.updated_at;" in SESSIONS_JS
+    assert "S.session.last_message_at = remoteLast" not in SESSIONS_JS
+
+
+def test_active_session_external_refresh_test_covers_count_decrease_and_same_count_message_change():
+    """Source lock for the maintainer-requested reverse direction.
+
+    The reload predicate must be symmetric for message_count changes (increase
+    or decrease) and also reload when message_count is equal but last_message_at
+    differs (edited/regenerated last turn).
+    """
+    predicate = "remoteCount !== localCount || remoteMsgLast !== localMsgLast"
+    assert predicate in SESSIONS_JS
+    # Ensure the metadata-only branch is keyed ONLY on updated_at after the
+    # message predicate, not on last_message_at.
+    refresh_body = SESSIONS_JS[SESSIONS_JS.index("async function refreshActiveSessionIfExternallyUpdated") : SESSIONS_JS.index("function ensureActiveSessionExternalRefreshPoll")]
+    assert refresh_body.index(predicate) < refresh_body.index("remoteUpdatedAt > localUpdatedAt")
 
 
 def test_webui_source_never_counts_as_external_session():

@@ -4354,7 +4354,8 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(typeof document !== 'undefined' && document.hidden) return;
   const sid = S.session.session_id;
   const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
-  const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
+  const localMsgLast = Number(S.session.last_message_at || 0);
+  const localUpdatedAt = Number(S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
@@ -4362,26 +4363,21 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(!S.session || S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
     const remoteCount = Number(data.session.message_count || 0);
-    const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
-    // Only force-reload the whole transcript when the visible conversation
-    // actually grew (more messages). A bump in last_message_at WITHOUT a higher
-    // message_count means a non-transcript write touched the session — most
-    // commonly the post-turn background skill/memory review, which rewrites
-    // memory/skills and advances updated_at but adds no chat messages. Reloading
-    // on that bump tears down and re-fetches the transcript: loadSession(force)
-    // clears S.messages and awaits a round-trip before re-rendering, so the whole
-    // conversation visibly disappears and "reappears a moment later" with no new
-    // content. Skip the destructive reload in that case and just refresh the
-    // lightweight sidebar list metadata. A real new message (remoteCount higher)
-    // still force-reloads as before. Also keep the local last-seen marker current
-    // so the same metadata bump doesn't re-trigger on every subsequent poll.
-    if(remoteCount > localCount){
+    const remoteMsgLast = Number(data.session.last_message_at || 0);
+    const remoteUpdatedAt = Number(data.session.updated_at || 0);
+    // Force-reload only for real transcript changes: message_count differs in
+    // either direction (new rows or undo/retry/truncate shrink) OR the server's
+    // message timestamp changed with the same count (edited/regenerated last
+    // turn). Do NOT use updated_at as a message signal: background skill/memory
+    // review and other metadata-only writes can bump updated_at without changing
+    // S.messages, and a destructive loadSession(force) for that case visibly
+    // blanks the transcript before the async refetch repaints it.
+    if(remoteCount !== localCount || remoteMsgLast !== localMsgLast){
       await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
       if(typeof renderSessionList==='function') void renderSessionList();
-    }else if(remoteLast > localLast){
+    }else if(remoteUpdatedAt > localUpdatedAt){
       if(S.session && S.session.session_id === sid){
-        S.session.last_message_at = remoteLast;
-        if(data.session.updated_at) S.session.updated_at = data.session.updated_at;
+        S.session.updated_at = data.session.updated_at;
       }
       if(typeof renderSessionList==='function') void renderSessionList();
     }
