@@ -204,6 +204,27 @@ def test_cumulative_window_does_not_force_previous_turn_context():
     assert offset > 2
 
 
+def test_cold_load_semantic_prefix_has_a_hard_raw_row_limit():
+    messages = [
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": "previous complete answer"},
+        {"role": "user", "content": "current request"},
+    ]
+    for idx in range(2000):
+        messages.extend([
+            {"role": "assistant", "content": "", "tool_calls": [{"id": f"call_{idx}"}]},
+            {"role": "tool", "tool_call_id": f"call_{idx}", "content": f"result {idx}"},
+        ])
+
+    window, offset = _message_window_for_display(
+        messages, msg_limit=30, expand_renderable=True
+    )
+
+    assert offset > 2
+    assert len(window) <= 500
+    assert all(message.get("content") != "previous complete answer" for message in window)
+
+
 def test_initial_msg_limit_keeps_matching_trailing_tool_result_row():
     """A role:tool result row whose tool_call_id matches the newest assistant
     tool-call must be retained in the paginated window — the renderer rebuilds

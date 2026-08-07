@@ -8531,6 +8531,9 @@ def _message_has_stable_assistant_reply_for_window(message) -> bool:
     return False
 
 
+_COLD_LOAD_SEMANTIC_RAW_ROW_LIMIT = 500
+
+
 def _cold_load_semantic_context_start(source, start_idx: int, last_renderable_idx: int) -> int:
     """Keep the previous complete exchange beside a tool-heavy active turn.
 
@@ -8656,9 +8659,15 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
             start_idx = idx
             break
     if expand_renderable and msg_before is None:
-        start_idx = _cold_load_semantic_context_start(
+        semantic_start_idx = _cold_load_semantic_context_start(
             source, start_idx, last_renderable_idx
         )
+        # Keep the semantic prefix bounded in raw storage coordinates. A single
+        # active turn can contain thousands of hidden tool rows; pulling a very
+        # distant prior exchange into this response would defeat msg_limit and
+        # reintroduce an unbounded cold-load payload.
+        if end_idx - semantic_start_idx <= _COLD_LOAD_SEMANTIC_RAW_ROW_LIMIT:
+            start_idx = semantic_start_idx
     window = source[start_idx:end_idx]
     return window, start_idx
 
