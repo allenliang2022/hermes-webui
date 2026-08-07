@@ -1,0 +1,124 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const source=fs.readFileSync(new URL('../static/ui.js',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+
+function functionSource(name){
+  const start=source.indexOf(`function ${name}`);
+  assert.notEqual(start,-1,`${name} must exist`);
+  const brace=source.indexOf('{',start);
+  let depth=0;
+  for(let i=brace;i<source.length;i+=1){
+    if(source[i]==='{') depth+=1;
+    else if(source[i]==='}'){
+      depth-=1;
+      if(depth===0) return source.slice(start,i+1);
+    }
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
+const commentarySource=functionSource('_assistantCommentaryPayloadText');
+const displaySource=functionSource('_assistantDisplayContentFromMessage');
+const reasoningSource=functionSource('_assistantReasoningPayloadText');
+const sanitizeSource=functionSource('_sanitizeThinkingDisplayText');
+const normalizeSource=functionSource('_normalizeThinkingEchoCompare');
+const stripEchoSource=functionSource('_stripVisibleAssistantEchoFromThinking');
+const worklogSource=functionSource('_worklogReasoningTextFromMessage');
+const belongsSource=functionSource('_assistantMessageBelongsInWorklog');
+const settledRowsSource=functionSource('_anchorSceneRowsForSettledWorklog');
+const deferredRowsSource=functionSource('_deferredWorklogRowsFromGroup');
+const runtime=new Function(`function _stripXmlToolCallsDisplay(text){return String(text||'');}\nfunction _isAssistantEmptyPlaceholderContent(){return false;}\n${commentarySource}\n${displaySource}\n${reasoningSource}\n${sanitizeSource}\n${normalizeSource}\n${stripEchoSource}\n${worklogSource}\n${belongsSource}\nreturn {_assistantCommentaryPayloadText,_assistantDisplayContentFromMessage,_worklogReasoningTextFromMessage,_assistantMessageBelongsInWorklog};`)();
+
+const progress='Candidate identity verified; running the real restart now.';
+const commentaryMessage={
+  role:'assistant',
+  content:'',
+  reasoning:progress,
+  reasoning_content:progress,
+  codex_message_items:[{
+    type:'message', role:'assistant', status:'completed', phase:'commentary',
+    content:[{type:'output_text',text:progress}],
+  }],
+};
+assert.equal(runtime._assistantCommentaryPayloadText(commentaryMessage),progress);
+assert.equal(runtime._assistantDisplayContentFromMessage(commentaryMessage,''),progress,
+  'settled commentary must become ordinary assistant display content');
+assert.equal(runtime._worklogReasoningTextFromMessage(commentaryMessage,0,new Set(),progress,'',[progress]),'',
+  'the matching reasoning_content echo must not also render as Thinking');
+assert.equal(runtime._assistantMessageBelongsInWorklog({...commentaryMessage,_activityBurstId:9},0,new Set(),progress,{}),false,
+  'visible commentary with activity metadata must remain ordinary information');
+assert.equal(runtime._assistantMessageBelongsInWorklog({...commentaryMessage,_live:true},0,new Set(),progress,{}),false,
+  'visible live commentary must remain ordinary information');
+assert.equal(runtime._assistantMessageBelongsInWorklog({role:'assistant',content:'',tool_calls:[{id:'call-1'}]},0,new Set([0]),'',{}),true,
+  'an empty tool activity message still belongs in Worklog');
+
+const settledRowsRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\n${settledRowsSource}\nreturn _anchorSceneRowsForSettledWorklog;`)();
+const sceneRows=[
+  {role:'prose',kind:'process_prose',text:progress},
+  {role:'thinking',kind:'reasoning',text:'private reasoning'},
+  {role:'tool',kind:'tool_call',text:'terminal'},
+];
+const visibleBlocks={querySelector:selector=>selector==='[data-visible-commentary="1"]'?{}:null};
+assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
+  'settled Worklog must drop prose already rendered as ordinary commentary');
+assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},{querySelector:()=>null}),sceneRows,
+  'legacy scenes without a visible commentary owner keep their prose fallback');
+
+const deferredRowsRuntime=new Function('sceneRows','visibleBlocks',`
+  const S={messages:[{_anchor_activity_scene:{activity_rows:sceneRows}}]};
+  function _assistantTurnBlocks(){return visibleBlocks;}
+  function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}
+  ${settledRowsSource}
+  ${deferredRowsSource}
+  return _deferredWorklogRowsFromGroup;
+`)(sceneRows,visibleBlocks);
+const deferredGroup={
+  getAttribute:name=>name==='data-activity-disclosure-key'?'anchor-scene:0':null,
+  closest:()=>({}),
+};
+assert.deepEqual(deferredRowsRuntime(deferredGroup),sceneRows.slice(1),
+  'deferred/cache-restored Worklog rows must use the same commentary ownership filter');
+assert.equal(runtime._assistantDisplayContentFromMessage({...commentaryMessage,content:'final answer'},'final answer'),'final answer',
+  'a real final answer must remain authoritative');
+assert.equal(runtime._assistantCommentaryPayloadText({...commentaryMessage,codex_message_items:[{
+  type:'message',phase:'analysis',content:[{type:'output_text',text:'private reasoning'}],
+}]}),'','private reasoning is not visible commentary');
+assert.equal(runtime._assistantCommentaryPayloadText({...commentaryMessage,codex_message_items:[{
+  type:'reasoning',role:'assistant',phase:'commentary',content:[{type:'output_text',text:'private reasoning'}],
+}]}),'','a reasoning item cannot become visible merely by carrying a commentary phase');
+assert.equal(runtime._assistantCommentaryPayloadText({...commentaryMessage,codex_message_items:[{
+  type:'message',role:'user',phase:'commentary',content:[{type:'output_text',text:'user data'}],
+}]}),'','a user-role message item cannot be projected as assistant commentary');
+
+const renderSource=functionSource('renderMessages');
+const call='_assistantDisplayContentFromMessage(m, content)';
+assert.equal(renderSource.split(call).length-1,1,'renderMessages must consume commentary display classification exactly once');
+
+const phaseTarget="String(item.phase||'').toLowerCase()!=='commentary'";
+assert.equal(commentarySource.split(phaseTarget).length-1,1,'commentary mutation target must be unique');
+const phaseMutant=commentarySource.replace(phaseTarget,'true');
+const phaseRuntime=new Function(`${phaseMutant}\nreturn _assistantCommentaryPayloadText;`)();
+assert.notEqual(phaseRuntime(commentaryMessage),progress,'removing commentary classification must RED');
+
+const displayTarget="if(existing) return existing;";
+assert.equal(displaySource.split(displayTarget).length-1,1,'display mutation target must be unique');
+const displayMutant=displaySource.replace(displayTarget,'return existing;');
+const displayRuntime=new Function(`${commentarySource}\n${displayMutant}\nreturn _assistantDisplayContentFromMessage;`)();
+assert.notEqual(displayRuntime(commentaryMessage,''),progress,'disabling empty-content fallback must RED');
+
+const belongsTarget='if(hasVisibleText) return false;';
+assert.equal(belongsSource.split(belongsTarget).length-1,1,'visible prose ownership target must be unique');
+const belongsMutant=belongsSource.replace(belongsTarget,'');
+const belongsRuntime=new Function(`function _isAssistantEmptyPlaceholderContent(){return false;}\n${belongsMutant}\nreturn _assistantMessageBelongsInWorklog;`)();
+assert.notEqual(belongsRuntime({...commentaryMessage,_activityBurstId:9},0,new Set(),progress,{}),false,
+  'allowing activity metadata to override visible prose must RED');
+
+const settledRowsTarget="if(!hasVisibleCommentary) return rows;";
+assert.equal(settledRowsSource.split(settledRowsTarget).length-1,1,'settled Worklog ownership target must be unique');
+const settledRowsMutant=settledRowsSource.replace(settledRowsTarget,'return rows;');
+const settledRowsMutantRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\n${settledRowsMutant}\nreturn _anchorSceneRowsForSettledWorklog;`)();
+assert.notDeepEqual(settledRowsMutantRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
+  'duplicating visible commentary inside Worklog must RED');
+
+console.log('PASS commentary_is_visible_info');
