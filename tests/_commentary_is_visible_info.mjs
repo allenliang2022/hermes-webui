@@ -28,6 +28,7 @@ const worklogSource=functionSource('_worklogReasoningTextFromMessage');
 const belongsSource=functionSource('_assistantMessageBelongsInWorklog');
 const settledRowsSource=functionSource('_anchorSceneRowsForSettledWorklog');
 const deferredRowsSource=functionSource('_deferredWorklogRowsFromGroup');
+const revealSource=functionSource('_revealTransparentEarlierSteps');
 const runtime=new Function(`function _stripXmlToolCallsDisplay(text){return String(text||'');}\nfunction _isAssistantEmptyPlaceholderContent(){return false;}\n${commentarySource}\n${displaySource}\n${reasoningSource}\n${sanitizeSource}\n${normalizeSource}\n${stripEchoSource}\n${worklogSource}\n${belongsSource}\nreturn {_assistantCommentaryPayloadText,_assistantDisplayContentFromMessage,_worklogReasoningTextFromMessage,_assistantMessageBelongsInWorklog};`)();
 
 const progress='Candidate identity verified; running the real restart now.';
@@ -61,7 +62,11 @@ const sceneRows=[
   {role:'tool',kind:'tool_call',text:'terminal'},
 ];
 const visibleCommentaryNode={getAttribute:name=>name==='data-raw-text'?progress:null,textContent:progress};
-const visibleBlocks={querySelectorAll:selector=>selector==='[data-visible-commentary="1"]'?[visibleCommentaryNode]:[]};
+const visibleBlocks={
+  querySelectorAll:selector=>selector==='[data-visible-commentary="1"]'?[visibleCommentaryNode]:[],
+  insertBefore(fragment){this.inserted=fragment.children.slice();},
+  appendChild(fragment){this.inserted=fragment.children.slice();},
+};
 assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
   'settled Worklog must drop only prose already rendered as ordinary commentary');
 assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},{querySelectorAll:()=>[]}),sceneRows,
@@ -82,6 +87,38 @@ const deferredGroup={
 };
 assert.deepEqual(deferredRowsRuntime(deferredGroup),sceneRows.slice(1),
   'deferred/cache-restored Worklog rows must use the same commentary ownership filter');
+
+function runReveal(revealImplementation){
+  return new Function('sceneRows','visibleBlocks',`
+    const seen=[];
+    const _transparentRevealedTurns=new Set();
+    const _sessionHtmlCache=new Map();
+    const S={session:{session_id:'sid'}};
+    const messages={scrollTop:0,scrollHeight:100};
+    function $(id){return id==='messages'?messages:null;}
+    function _transparentRevealKey(){return 'sid:0';}
+    function _assistantTurnBlocks(){return visibleBlocks;}
+    function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}
+    function _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}
+    ${settledRowsSource}
+    function _anchorSceneLastNonTerminalWorkRowIndex(rows){return rows.length-1;}
+    function _assistantAnchorSceneFinalAnswerText(){return '';}
+    function msgContent(){return '';}
+    function _computeTransparentHiddenPrefixCount(rows){return rows.length;}
+    function _anchorSceneTransparentNodeForRow(row){if(!row)return null;seen.push(row);return {setAttribute(){}};}
+    function _syncTransparentEventControls(){}
+    const frag={children:[],appendChild(node){this.children.push(node);}};
+    const document={createDocumentFragment(){return frag;}};
+    const turnEl={setAttribute(){},removeAttribute(){}};
+    const segment={closest(){return turnEl;}};
+    const affordance={parentElement:visibleBlocks,getAttribute(){return String(sceneRows.length-1);},remove(){}};
+    ${revealImplementation}
+    _revealTransparentEarlierSteps({_anchor_activity_scene:{activity_rows:sceneRows}},segment,0,affordance);
+    return seen;
+  `)(sceneRows,visibleBlocks);
+}
+assert.deepEqual(runReveal(revealSource),sceneRows.slice(1),
+  'transparent earlier-step reveal must not resurrect the visible commentary echo');
 assert.equal(runtime._assistantDisplayContentFromMessage({...commentaryMessage,content:'final answer'},'final answer'),'final answer',
   'a real final answer must remain authoritative');
 assert.equal(runtime._assistantCommentaryPayloadText({...commentaryMessage,codex_message_items:[{
@@ -123,5 +160,14 @@ const settledRowsMutant=settledRowsSource.replace(settledRowsTarget,'return rows
 const settledRowsMutantRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${settledRowsMutant}\nreturn _anchorSceneRowsForSettledWorklog;`)();
 assert.notDeepEqual(settledRowsMutantRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
   'duplicating visible commentary inside Worklog must RED');
+
+const revealTarget="const rows=_anchorSceneRowsForSettledWorklog(scene,blocks)||[];";
+assert.equal(revealSource.split(revealTarget).length-1,1,'transparent reveal ownership target must be unique');
+const revealMutant=revealSource.replace(
+  revealTarget,
+  "const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];",
+);
+assert.notDeepEqual(runReveal(revealMutant),sceneRows.slice(1),
+  'bypassing commentary ownership during earlier-step reveal must RED');
 
 console.log('PASS commentary_is_visible_info');

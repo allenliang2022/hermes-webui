@@ -13621,7 +13621,7 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks)||[];
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   const finalAnswer=String(
     (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
