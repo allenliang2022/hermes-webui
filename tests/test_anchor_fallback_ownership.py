@@ -926,7 +926,7 @@ def test_anchor_settled_renderers_remain_the_primary_scene_path():
 
     assert "_anchorSceneRowsForRendering(scene,{settled:true})" in helper
     assert "data-visible-commentary" in helper
-    assert "String(row.role||'')==='prose'" in helper
+    assert "String(row.role||'')!=='prose'" in helper
 
     assert "if(!message||!message._anchor_activity_scene||!segment) return false;" in settled
     assert "return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);" in settled

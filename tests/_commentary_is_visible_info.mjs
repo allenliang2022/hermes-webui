@@ -53,22 +53,25 @@ assert.equal(runtime._assistantMessageBelongsInWorklog({...commentaryMessage,_li
 assert.equal(runtime._assistantMessageBelongsInWorklog({role:'assistant',content:'',tool_calls:[{id:'call-1'}]},0,new Set([0]),'',{}),true,
   'an empty tool activity message still belongs in Worklog');
 
-const settledRowsRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\n${settledRowsSource}\nreturn _anchorSceneRowsForSettledWorklog;`)();
+const settledRowsRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${settledRowsSource}\nreturn _anchorSceneRowsForSettledWorklog;`)();
 const sceneRows=[
   {role:'prose',kind:'process_prose',text:progress},
+  {role:'prose',kind:'process_prose',text:'Distinct process prose'},
   {role:'thinking',kind:'reasoning',text:'private reasoning'},
   {role:'tool',kind:'tool_call',text:'terminal'},
 ];
-const visibleBlocks={querySelector:selector=>selector==='[data-visible-commentary="1"]'?{}:null};
+const visibleCommentaryNode={getAttribute:name=>name==='data-raw-text'?progress:null,textContent:progress};
+const visibleBlocks={querySelectorAll:selector=>selector==='[data-visible-commentary="1"]'?[visibleCommentaryNode]:[]};
 assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
-  'settled Worklog must drop prose already rendered as ordinary commentary');
-assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},{querySelector:()=>null}),sceneRows,
+  'settled Worklog must drop only prose already rendered as ordinary commentary');
+assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},{querySelectorAll:()=>[]}),sceneRows,
   'legacy scenes without a visible commentary owner keep their prose fallback');
 
 const deferredRowsRuntime=new Function('sceneRows','visibleBlocks',`
   const S={messages:[{_anchor_activity_scene:{activity_rows:sceneRows}}]};
   function _assistantTurnBlocks(){return visibleBlocks;}
   function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}
+  function _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}
   ${settledRowsSource}
   ${deferredRowsSource}
   return _deferredWorklogRowsFromGroup;
@@ -114,10 +117,10 @@ const belongsRuntime=new Function(`function _isAssistantEmptyPlaceholderContent(
 assert.notEqual(belongsRuntime({...commentaryMessage,_activityBurstId:9},0,new Set(),progress,{}),false,
   'allowing activity metadata to override visible prose must RED');
 
-const settledRowsTarget="if(!hasVisibleCommentary) return rows;";
+const settledRowsTarget="if(!visibleCommentaryTexts.size) return rows;";
 assert.equal(settledRowsSource.split(settledRowsTarget).length-1,1,'settled Worklog ownership target must be unique');
 const settledRowsMutant=settledRowsSource.replace(settledRowsTarget,'return rows;');
-const settledRowsMutantRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\n${settledRowsMutant}\nreturn _anchorSceneRowsForSettledWorklog;`)();
+const settledRowsMutantRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${settledRowsMutant}\nreturn _anchorSceneRowsForSettledWorklog;`)();
 assert.notDeepEqual(settledRowsMutantRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
   'duplicating visible commentary inside Worklog must RED');
 

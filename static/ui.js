@@ -13431,13 +13431,24 @@ function _anchorSceneHasErroredTerminalState(scene){
 }
 function _anchorSceneRowsForSettledWorklog(scene, blocks){
   const rows=_anchorSceneRowsForRendering(scene,{settled:true});
-  const hasVisibleCommentary=!!(
-    blocks&&blocks.querySelector&&blocks.querySelector('[data-visible-commentary="1"]')
-  );
-  if(!hasVisibleCommentary) return rows;
+  const visibleCommentaryTexts=new Set();
+  if(blocks&&blocks.querySelectorAll){
+    blocks.querySelectorAll('[data-visible-commentary="1"]').forEach(node=>{
+      const key=_normalizeThinkingEchoCompare(
+        node.getAttribute('data-raw-text')||node.textContent||''
+      );
+      if(key) visibleCommentaryTexts.add(key);
+    });
+  }
+  if(!visibleCommentaryTexts.size) return rows;
   // Commentary is ordinary assistant information. Keep tools, true reasoning
-  // and terminal rows in Worklog, but do not duplicate the progress prose.
-  return rows.filter(row=>!(row&&String(row.role||'')==='prose'));
+  // and DISTINCT process prose in Worklog; remove only an exact commentary echo.
+  return rows.filter(row=>{
+    if(!row||String(row.role||'')!=='prose') return true;
+    return !visibleCommentaryTexts.has(
+      _normalizeThinkingEchoCompare(row.text||row.content||'')
+    );
+  });
 }
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
@@ -16322,7 +16333,7 @@ function renderMessages(options){
     }
     const commentaryDisplayText=!isUser?_assistantCommentaryPayloadText(m):'';
     const isVisibleCommentary=!!(!isUser&&!String(content||'').trim()&&String(commentaryDisplayText||'').trim());
-    let displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):_assistantDisplayContentFromMessage(m, content);
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):_assistantDisplayContentFromMessage(m, content);
     if(isVisibleCommentary) content=displayContent;
     const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
