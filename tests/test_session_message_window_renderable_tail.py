@@ -167,6 +167,7 @@ def test_cold_load_keeps_previous_complete_reply_before_tool_heavy_active_turn()
                 "content": "",
                 "codex_message_items": [{
                     "type": "message",
+                    "role": "assistant",
                     "phase": "commentary",
                     "content": [{"type": "output_text", "text": f"progress {idx}"}],
                 }],
