@@ -169,6 +169,13 @@ if (-not $env:HERMES_HOME) {
 if (-not $env:HERMES_WEBUI_STATE_DIR) {
     $env:HERMES_WEBUI_STATE_DIR = Join-Path $env:HERMES_HOME 'webui'
 }
+# Allow /api/media to serve files from the D:\ai tree (ComfyUI videos/images,
+# model outputs, etc.). Without this, /api/media 403s any path outside
+# HERMES_HOME / active workspace / tmp. Only set a default when the caller
+# (e.g. the autostart VBS) hasn't already provided its own value.
+if (-not $env:MEDIA_ALLOWED_ROOTS) {
+    $env:MEDIA_ALLOWED_ROOTS = 'D:\ai'
+}
 
 # === Ensure dirs exist =================================================
 New-Item -ItemType Directory -Force -Path $env:HERMES_HOME | Out-Null

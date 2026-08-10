@@ -1174,6 +1174,13 @@ function _remountMessageViewportAnchor(anchor){
   }
   if(visIdx<0&&Number.isFinite(targetIdx)) visIdx=_messageVisibleIndexForRawIdx(targetIdx,visWithIdx);
   if(visIdx<0) return false;
+  // cOA=auto parity for virtual remounts (real-device v69): a remount attempted to
+  // pre-position scrollTop 4959->4054 during terminal `_finishDone`, then native
+  // anchoring also moved it (settled RAW -1205 with dH-47). On a viewport whose
+  // computed overflow-anchor is active, the browser already owns this hold; the
+  // preparatory scroll is a double-compensation and must be refused. Desktop
+  // cOA=none still needs the virtual pre-position/render path below.
+  if(typeof _browserOverflowAnchorActive==='function'&&_browserOverflowAnchorActive(container)) return false;
   // A virtualized anchor may be outside the current DOM. Scroll to its virtual
   // row and render once so the semantic restore below has a real target.
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
@@ -2374,6 +2381,125 @@ function _openMermaidLightbox(svgEl) {
   document.addEventListener('keydown', lb._keyHandler);
   return lb;
 }
+// ── Lightbox image pinch-zoom / drag-pan / double-tap-zoom ────────────────
+// Gives message-attached images the same zoom affordance mermaid diagrams have.
+// Touch: pinch to zoom, one-finger drag to pan when zoomed, double-tap toggles
+// 2.5x at the tap point. Desktop: mouse wheel zooms toward the cursor, drag pans,
+// double-click toggles zoom. Panning/zoom gestures stop propagation so the
+// backdrop-click close and prev/next nav only fire when not interacting.
+function _attachImgZoom(lb, img) {
+  const st = { scale: 1, tx: 0, ty: 0, minScale: 1, maxScale: 6 };
+  lb._imgZoom = st;
+  const apply = () => {
+    img.style.transform = 'translate(' + st.tx + 'px,' + st.ty + 'px) scale(' + st.scale + ')';
+    img.style.cursor = st.scale > 1.01 ? 'grab' : 'default';
+    lb.classList.toggle('img-lightbox--zoomed', st.scale > 1.01);
+  };
+  // Reset on nav/src change — exposed so _navigateLightbox can call it.
+  st.reset = () => { st.scale = 1; st.tx = 0; st.ty = 0; apply(); };
+  const clampPan = () => {
+    // Keep the image roughly within the viewport so it can't be flung away.
+    const r = img.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const maxX = Math.max(0, (r.width - vw) / 2 + 40);
+    const maxY = Math.max(0, (r.height - vh) / 2 + 40);
+    st.tx = Math.max(-maxX, Math.min(maxX, st.tx));
+    st.ty = Math.max(-maxY, Math.min(maxY, st.ty));
+  };
+  const zoomAt = (cx, cy, nextScale) => {
+    nextScale = Math.max(st.minScale, Math.min(st.maxScale, nextScale));
+    const rect = img.getBoundingClientRect();
+    // Point on the (untransformed) image under the cursor, relative to its center.
+    const ox = cx - (rect.left + rect.width / 2);
+    const oy = cy - (rect.top + rect.height / 2);
+    const ratio = nextScale / st.scale;
+    st.tx = st.tx - ox * (ratio - 1);
+    st.ty = st.ty - oy * (ratio - 1);
+    st.scale = nextScale;
+    if(st.scale <= 1.01){ st.scale = 1; st.tx = 0; st.ty = 0; }
+    else clampPan();
+    apply();
+  };
+  // ── Touch gestures ──
+  let pinchStartDist = 0, pinchStartScale = 1, pinchCx = 0, pinchCy = 0;
+  let panStartX = 0, panStartY = 0, panTx = 0, panTy = 0, panning = false;
+  let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
+  const dist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+  img.addEventListener('touchstart', e => {
+    if(e.touches.length === 2){
+      e.preventDefault(); e.stopPropagation();
+      pinchStartDist = dist(e.touches[0], e.touches[1]);
+      pinchStartScale = st.scale;
+      pinchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      pinchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      panning = false;
+    } else if(e.touches.length === 1){
+      const now = Date.now();
+      const t = e.touches[0];
+      if(now - lastTapTime < 300 && Math.abs(t.clientX - lastTapX) < 30 && Math.abs(t.clientY - lastTapY) < 30){
+        // Double-tap → toggle zoom at tap point.
+        e.preventDefault(); e.stopPropagation();
+        zoomAt(t.clientX, t.clientY, st.scale > 1.01 ? 1 : 2.5);
+        lastTapTime = 0;
+        return;
+      }
+      lastTapTime = now; lastTapX = t.clientX; lastTapY = t.clientY;
+      if(st.scale > 1.01){
+        e.stopPropagation();
+        panning = true;
+        panStartX = t.clientX; panStartY = t.clientY; panTx = st.tx; panTy = st.ty;
+      }
+    }
+  }, { passive: false });
+  img.addEventListener('touchmove', e => {
+    if(e.touches.length === 2 && pinchStartDist > 0){
+      e.preventDefault(); e.stopPropagation();
+      const d = dist(e.touches[0], e.touches[1]);
+      zoomAt(pinchCx, pinchCy, pinchStartScale * (d / pinchStartDist));
+    } else if(e.touches.length === 1 && panning){
+      e.preventDefault(); e.stopPropagation();
+      st.tx = panTx + (e.touches[0].clientX - panStartX);
+      st.ty = panTy + (e.touches[0].clientY - panStartY);
+      clampPan(); apply();
+    }
+  }, { passive: false });
+  img.addEventListener('touchend', e => {
+    if(e.touches.length < 2) pinchStartDist = 0;
+    if(e.touches.length === 0) panning = false;
+    // When zoomed, swallow the click so the backdrop close doesn't fire.
+    if(st.scale > 1.01) e.stopPropagation();
+  }, { passive: false });
+  // ── Desktop: wheel zoom + drag pan + double-click ──
+  img.addEventListener('wheel', e => {
+    e.preventDefault(); e.stopPropagation();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    zoomAt(e.clientX, e.clientY, st.scale * factor);
+  }, { passive: false });
+  let mDown = false, mStartX = 0, mStartY = 0, mTx = 0, mTy = 0, mMoved = false;
+  img.addEventListener('mousedown', e => {
+    if(st.scale <= 1.01) return;
+    e.preventDefault(); e.stopPropagation();
+    mDown = true; mMoved = false;
+    mStartX = e.clientX; mStartY = e.clientY; mTx = st.tx; mTy = st.ty;
+    img.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', lb._imgZoomMove = e => {
+    if(!mDown) return;
+    st.tx = mTx + (e.clientX - mStartX);
+    st.ty = mTy + (e.clientY - mStartY);
+    if(Math.abs(e.clientX - mStartX) > 3 || Math.abs(e.clientY - mStartY) > 3) mMoved = true;
+    clampPan(); apply();
+  });
+  window.addEventListener('mouseup', lb._imgZoomUp = () => {
+    if(mDown){ mDown = false; img.style.cursor = st.scale > 1.01 ? 'grab' : 'default'; }
+  });
+  img.addEventListener('dblclick', e => {
+    e.preventDefault(); e.stopPropagation();
+    zoomAt(e.clientX, e.clientY, st.scale > 1.01 ? 1 : 2.5);
+  });
+  apply();
+}
+
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
@@ -2384,6 +2510,7 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   img.src = src;
   img.alt = alt || '';
   img.onclick = e => e.stopPropagation();
+  _attachImgZoom(lb, img);
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
@@ -2437,12 +2564,21 @@ function _navigateLightbox(lb, direction) {
   lbImg.src = nextImg.src;
   lbImg.alt = nextImg.alt || '';
   lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  // Reset any zoom/pan when switching images.
+  if(lb._imgZoom && typeof lb._imgZoom.reset === 'function') lb._imgZoom.reset();
   // Update counter via stored reference — no DOM query.
   if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  // Detach the window-level pan listeners added by _attachImgZoom.
+  if(lb._imgZoomMove && window && typeof window.removeEventListener === 'function'){
+    window.removeEventListener('mousemove', lb._imgZoomMove);
+  }
+  if(lb._imgZoomUp && window && typeof window.removeEventListener === 'function'){
+    window.removeEventListener('mouseup', lb._imgZoomUp);
+  }
   if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
     window.removeEventListener('resize', lb._mermaidResizeHandler);
   }
@@ -2452,6 +2588,161 @@ function _closeImgLightbox(lb) {
   }
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
+}
+
+// ── Video lightbox: fullscreen clip with pinch/drag/double-tap/wheel zoom ──
+// Distinct from the image path because a <video> owns a native controls strip
+// along its bottom edge. Zoom gestures must NOT steal single-finger taps/drags
+// aimed at play/scrub/volume/fullscreen. Rules:
+//  • Two-finger pinch zooms anywhere (two fingers never target the scrubber).
+//  • Mouse wheel zooms toward the cursor (desktop).
+//  • Double-tap / double-click toggles 2.5× at the point.
+//  • One-finger drag pans ONLY when already zoomed (>1.01×); at 1× the touch
+//    passes through to the native controls so playback still works.
+//  • The bottom ~64px control band is always left to native controls at 1×.
+function _attachVideoZoom(lb, video) {
+  const st = { scale: 1, tx: 0, ty: 0, minScale: 1, maxScale: 6 };
+  lb._imgZoom = st;
+  const CONTROL_BAND = 64; // px reserved for native controls at the bottom
+  const apply = () => {
+    video.style.transform = 'translate(' + st.tx + 'px,' + st.ty + 'px) scale(' + st.scale + ')';
+    video.style.cursor = st.scale > 1.01 ? 'grab' : 'default';
+    lb.classList.toggle('img-lightbox--zoomed', st.scale > 1.01);
+  };
+  st.reset = () => { st.scale = 1; st.tx = 0; st.ty = 0; apply(); };
+  const clampPan = () => {
+    const r = video.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const maxX = Math.max(0, (r.width - vw) / 2 + 40);
+    const maxY = Math.max(0, (r.height - vh) / 2 + 40);
+    st.tx = Math.max(-maxX, Math.min(maxX, st.tx));
+    st.ty = Math.max(-maxY, Math.min(maxY, st.ty));
+  };
+  const zoomAt = (cx, cy, nextScale) => {
+    nextScale = Math.max(st.minScale, Math.min(st.maxScale, nextScale));
+    const rect = video.getBoundingClientRect();
+    const ox = cx - (rect.left + rect.width / 2);
+    const oy = cy - (rect.top + rect.height / 2);
+    const ratio = nextScale / st.scale;
+    st.tx = st.tx - ox * (ratio - 1);
+    st.ty = st.ty - oy * (ratio - 1);
+    st.scale = nextScale;
+    if(st.scale <= 1.01){ st.scale = 1; st.tx = 0; st.ty = 0; }
+    else clampPan();
+    apply();
+  };
+  // True when a point sits in the native control band (only relevant at 1×).
+  const inControlBand = (clientY) => {
+    const r = video.getBoundingClientRect();
+    return clientY >= r.bottom - CONTROL_BAND;
+  };
+  // ── Touch gestures ──
+  let pinchStartDist = 0, pinchStartScale = 1, pinchCx = 0, pinchCy = 0;
+  let panStartX = 0, panStartY = 0, panTx = 0, panTy = 0, panning = false;
+  let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
+  const dist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+  video.addEventListener('touchstart', e => {
+    if(e.touches.length === 2){
+      // Pinch always wins — two fingers never mean "use the scrubber".
+      e.preventDefault(); e.stopPropagation();
+      pinchStartDist = dist(e.touches[0], e.touches[1]);
+      pinchStartScale = st.scale;
+      pinchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      pinchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      panning = false;
+    } else if(e.touches.length === 1){
+      const t = e.touches[0];
+      // At 1× inside the control band → let native controls handle it.
+      if(st.scale <= 1.01 && inControlBand(t.clientY)) return;
+      const now = Date.now();
+      if(now - lastTapTime < 300 && Math.abs(t.clientX - lastTapX) < 30 && Math.abs(t.clientY - lastTapY) < 30){
+        e.preventDefault(); e.stopPropagation();
+        zoomAt(t.clientX, t.clientY, st.scale > 1.01 ? 1 : 2.5);
+        lastTapTime = 0;
+        return;
+      }
+      lastTapTime = now; lastTapX = t.clientX; lastTapY = t.clientY;
+      if(st.scale > 1.01){
+        e.stopPropagation();
+        panning = true;
+        panStartX = t.clientX; panStartY = t.clientY; panTx = st.tx; panTy = st.ty;
+      }
+    }
+  }, { passive: false });
+  video.addEventListener('touchmove', e => {
+    if(e.touches.length === 2 && pinchStartDist > 0){
+      e.preventDefault(); e.stopPropagation();
+      const d = dist(e.touches[0], e.touches[1]);
+      zoomAt(pinchCx, pinchCy, pinchStartScale * (d / pinchStartDist));
+    } else if(e.touches.length === 1 && panning){
+      e.preventDefault(); e.stopPropagation();
+      st.tx = panTx + (e.touches[0].clientX - panStartX);
+      st.ty = panTy + (e.touches[0].clientY - panStartY);
+      clampPan(); apply();
+    }
+  }, { passive: false });
+  video.addEventListener('touchend', e => {
+    if(e.touches.length < 2) pinchStartDist = 0;
+    if(e.touches.length === 0) panning = false;
+    if(st.scale > 1.01) e.stopPropagation();
+  }, { passive: false });
+  // ── Desktop: wheel zoom + drag pan (when zoomed) + double-click ──
+  video.addEventListener('wheel', e => {
+    e.preventDefault(); e.stopPropagation();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    zoomAt(e.clientX, e.clientY, st.scale * factor);
+  }, { passive: false });
+  let mDown = false, mStartX = 0, mStartY = 0, mTx = 0, mTy = 0;
+  video.addEventListener('mousedown', e => {
+    if(st.scale <= 1.01) return; // at 1×, leave clicks to native controls
+    e.preventDefault(); e.stopPropagation();
+    mDown = true;
+    mStartX = e.clientX; mStartY = e.clientY; mTx = st.tx; mTy = st.ty;
+    video.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', lb._imgZoomMove = e => {
+    if(!mDown) return;
+    st.tx = mTx + (e.clientX - mStartX);
+    st.ty = mTy + (e.clientY - mStartY);
+    clampPan(); apply();
+  });
+  window.addEventListener('mouseup', lb._imgZoomUp = () => {
+    if(mDown){ mDown = false; video.style.cursor = st.scale > 1.01 ? 'grab' : 'default'; }
+  });
+  video.addEventListener('dblclick', e => {
+    e.preventDefault(); e.stopPropagation();
+    zoomAt(e.clientX, e.clientY, st.scale > 1.01 ? 1 : 2.5);
+  });
+  apply();
+}
+
+function _openVideoLightbox(src, name) {
+  const lb = document.createElement('div');
+  lb.className = 'img-lightbox img-lightbox--video';
+  lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-modal', 'true');
+  lb.setAttribute('aria-label', name || 'Video');
+  const video = document.createElement('video');
+  video.src = src;
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = 'metadata';
+  video.className = 'img-lightbox-video';
+  if(name) video.title = name;
+  video.onclick = e => e.stopPropagation();
+  _attachVideoZoom(lb, video);
+  const cls = document.createElement('button');
+  cls.className = 'img-lightbox-close';
+  cls.setAttribute('aria-label', 'Close');
+  cls.textContent = '×';
+  cls.onclick = () => _closeImgLightbox(lb);
+  lb.appendChild(video);
+  lb.appendChild(cls);
+  lb.onclick = () => _closeImgLightbox(lb);
+  document.body.appendChild(lb);
+  lb._keyHandler = e => { if(e.key==='Escape'){ _closeImgLightbox(lb); } };
+  document.addEventListener('keydown', lb._keyHandler);
+  try { video.play().catch(()=>{}); } catch(_){}
 }
 
 document.addEventListener('click', e => {
@@ -2479,6 +2770,16 @@ document.addEventListener('click', e => {
   // Message-attached images (already wired since v0.50.x).
   let img = e.target.closest('.msg-media-img');
   if(img){ _openImgLightbox(img); return; }
+  // Video zoom button — opens the clip in a fullscreen lightbox with pinch/
+  // drag/double-tap/wheel zoom, keeping native playback controls.
+  const vZoom = e.target.closest('.msg-media-zoom');
+  if(vZoom){
+    e.preventDefault(); e.stopPropagation();
+    const src = vZoom.getAttribute('data-media-src') || '';
+    const name = vZoom.getAttribute('data-media-name') || '';
+    if(src) _openVideoLightbox(src, name);
+    return;
+  }
   const mermaidSvg = e.target.closest('.mermaid-rendered svg');
   if(mermaidSvg){ _openMermaidLightbox(mermaidSvg); return; }
   // Composer attach-tray image thumbnails — click any pasted/dropped image
@@ -2546,7 +2847,13 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
   const tag=kind==='video'
     ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
     : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
-  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+  // Video gets a "zoom" affordance in its meta row: opens the clip in a
+  // fullscreen lightbox with the same pinch/drag/double-tap/wheel zoom as
+  // images, while keeping native playback controls. Not added to audio.
+  const zoomBtn=kind==='video'
+    ? `<button type="button" class="msg-media-zoom" data-media-src="${safeSrc}" data-media-name="${safeName}" title="Zoom video" aria-label="Zoom video">⛶</button>`
+    : '';
+  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${zoomBtn}${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
 }
 // Shared MEDIA: token renderer used by both the full-pipeline renderMd() and
 // the streaming smd path in messages.js. Centralised so the live + settled
@@ -10742,10 +11049,40 @@ function _assistantAnchorSceneFinalAnswerText(m){
   const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
   return String(text||'').trim()?text:'';
 }
+function _assistantCommentaryPayloadText(m){
+  if(!m||m.role!=='assistant') return '';
+  let items=m.codex_message_items;
+  if(typeof items==='string'){
+    try{items=JSON.parse(items);}catch(_){items=[];}
+  }
+  if(!Array.isArray(items)) return '';
+  const parts=[];
+  for(const item of items){
+    if(
+      !item||
+      String(item.type||'').toLowerCase()!=='message'||
+      String(item.role||'').toLowerCase()!=='assistant'||
+      String(item.phase||'').toLowerCase()!=='commentary'
+    ) continue;
+    const content=Array.isArray(item.content)?item.content:[];
+    for(const part of content){
+      if(!part||!['text','input_text','output_text'].includes(String(part.type||''))) continue;
+      const text=String(part.text||part.content||'');
+      if(text.trim()) parts.push(text);
+    }
+  }
+  return parts.join('').trim();
+}
+function _assistantDisplayContentFromMessage(m, rawContent){
+  const existing=String(rawContent||'').trim();
+  if(existing) return existing;
+  return _assistantCommentaryPayloadText(m);
+}
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
   if(_assistantAnchorSceneFinalAnswerText(m)) return true;
+  if(_assistantCommentaryPayloadText(m)) return true;
   const content=m.content;
   if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
   if(!Array.isArray(content)) return false;
@@ -10853,16 +11190,19 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
-  if(m._live) return true;
+  if(m._live) return !hasVisibleText;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
+  // User-visible commentary/progress is ordinary assistant information even
+  // when it carries activity burst/segment metadata. Those fields describe
+  // chronology; they must not reclassify visible prose as Worklog Thinking.
+  if(hasVisibleText) return false;
   if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
   const hasToolMetadata=!!(
     (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
     (Array.isArray(m.tool_calls)&&m.tool_calls.length)||
     (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
   );
-  if(hasVisibleText) return false;
   if(hasToolMetadata) return true;
   return false;
 }
@@ -12072,7 +12412,8 @@ function _deferredWorklogRowsFromGroup(group){
   const msg=S.messages&&S.messages[Number(m[1])];
   const scene=msg&&msg._anchor_activity_scene;
   if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true});
+  const blocks=_assistantTurnBlocks(group.closest('.assistant-turn'));
+  return _anchorSceneRowsForSettledWorklog(scene,blocks);
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -13410,13 +13751,34 @@ function _anchorSceneHasErroredTerminalState(scene){
   const state=String(scene&&scene.terminal_state||'').trim().toLowerCase();
   return _ANCHOR_SCENE_ERRORED_TERMINAL_STATES.has(state);
 }
+function _anchorSceneRowsForSettledWorklog(scene, blocks){
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const visibleCommentaryTexts=new Set();
+  if(blocks&&blocks.querySelectorAll){
+    blocks.querySelectorAll('[data-visible-commentary="1"]').forEach(node=>{
+      const key=_normalizeThinkingEchoCompare(
+        node.getAttribute('data-raw-text')||node.textContent||''
+      );
+      if(key) visibleCommentaryTexts.add(key);
+    });
+  }
+  if(!visibleCommentaryTexts.size) return rows;
+  // Commentary is ordinary assistant information. Keep tools, true reasoning
+  // and DISTINCT process prose in Worklog; remove only an exact commentary echo.
+  return rows.filter(row=>{
+    if(!row||String(row.role||'')!=='prose') return true;
+    return !visibleCommentaryTexts.has(
+      _normalizeThinkingEchoCompare(row.text||row.content||'')
+    );
+  });
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks);
   if(!rows.length) return false;
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
@@ -13431,7 +13793,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   blocks.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    if(Number.isFinite(idx)&&idx<rawIdx&&node.getAttribute('data-visible-commentary')!=='1'){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -13581,7 +13943,7 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks)||[];
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   const finalAnswer=String(
     (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
@@ -13749,11 +14111,11 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks);
   if(!rows.length) return false;
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    if(Number.isFinite(idx)&&idx<rawIdx&&node.getAttribute('data-visible-commentary')!=='1'){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -16352,7 +16714,10 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const commentaryDisplayText=!isUser?_assistantCommentaryPayloadText(m):'';
+    const isVisibleCommentary=!!(!isUser&&!String(content||'').trim()&&String(commentaryDisplayText||'').trim());
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):_assistantDisplayContentFromMessage(m, content);
+    if(isVisibleCommentary) content=displayContent;
     const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
@@ -16613,6 +16978,7 @@ function renderMessages(options){
     seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
     seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
     seg.dataset.rawText=String(content).trim();
+    if(isVisibleCommentary) seg.setAttribute('data-visible-commentary','1');
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
     const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});

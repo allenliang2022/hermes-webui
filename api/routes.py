@@ -3301,6 +3301,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    delivered_steer_events: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3443,6 +3444,23 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name == "steer_delivered":
+            text = str(payload.get("text") or "").strip()
+            if text:
+                event_seq = int(event.get("seq") or 0)
+                delivered_steer_events.append(
+                    {
+                        "event_id": _run_journal_snapshot_event_id_for_run(
+                            event, run_id, event_seq
+                        ),
+                        "seq": event_seq or None,
+                        "created_at": event.get("created_at"),
+                        "text": text,
+                        "status": str(payload.get("status") or "delivered"),
+                        "payload": dict(payload),
+                    }
+                )
 
     if assistant_text or reasoning_text:
         message = {
@@ -3715,6 +3733,48 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     append_thinking_row(force=True)
 
+    # Steer delivery is a durable control boundary, not assistant prose.  It
+    # must be rebuilt from the journal independently of token/tool projection so
+    # a refresh sees the same row that live SSE displayed.
+    for control in delivered_steer_events:
+        event_id = control.get("event_id")
+        event_seq = control.get("seq")
+        row_id = event_id or f"steer:{stream_id}:{event_seq or len(anchor_activity_rows)}"
+        anchor_activity_rows.append(
+            {
+                "row_id": row_id,
+                "order_index": len(anchor_activity_rows),
+                "kind": "control_boundary",
+                "role": "control",
+                "display_hint": "control_boundary_row",
+                "display_hints": {
+                    "compact_worklog": "control_boundary_row",
+                    "transparent_stream": "chronological_activity",
+                },
+                "source_event_type": "steer_delivered",
+                "event_id": event_id,
+                "local_id": row_id,
+                "run_id": run_id,
+                "stream_id": stream_id,
+                "seq": event_seq,
+                "status": control.get("status") or "delivered",
+                "created_at": control.get("created_at"),
+                "identity": {
+                    "event_id": event_id,
+                    "local_id": row_id,
+                    "run_id": run_id,
+                    "stream_id": stream_id,
+                    "seq": event_seq,
+                },
+                "group": scene_group(),
+                "text": control.get("text") or "",
+                "thinking": None,
+                "tool_call_id": "",
+                "tool": None,
+                "payload": control.get("payload") or {},
+            }
+        )
+
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
     if not anchor_activity_rows and events:
@@ -3865,7 +3925,8 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
     compact_rows = []
     row_keys = (
         "row_id", "local_id", "kind", "role", "source_event_type", "status",
-        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+        "event_id", "run_id", "stream_id", "seq", "created_at", "group", "text",
+        "thinking", "tool_call_id", "tool",
     )
     for raw_row in scene.get("activity_rows") or []:
         if not isinstance(raw_row, dict):
@@ -8673,6 +8734,59 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     return bool(role and role != "tool")
 
 
+def _message_has_stable_assistant_reply_for_window(message) -> bool:
+    """Return true for settled assistant prose, not tool/commentary activity."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
+        return False
+    if message.get("tool_calls") or message.get("_partial_tool_calls"):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(
+            isinstance(part, dict)
+            and str(part.get("type") or "") in {"text", "input_text", "output_text"}
+            and str(part.get("text") or part.get("content") or "").strip()
+            for part in content
+        )
+    return False
+
+
+_COLD_LOAD_SEMANTIC_RAW_ROW_LIMIT = 500
+
+
+def _cold_load_semantic_context_start(source, start_idx: int, last_renderable_idx: int) -> int:
+    """Keep the previous complete exchange beside a tool-heavy active turn.
+
+    A Responses turn can persist hundreds of empty assistant tool/commentary
+    rows. Counting each one as a visible row lets them consume the entire tail
+    budget, so restart cold-load shows only Thinking and hides the latest normal
+    answer. This adds one bounded semantic prefix: the latest user row, the
+    preceding settled assistant reply, and its user row when present.
+    """
+    latest_user_idx = None
+    for idx in range(last_renderable_idx, -1, -1):
+        if isinstance(source[idx], dict) and str(source[idx].get("role") or "").lower() == "user":
+            latest_user_idx = idx
+            break
+    if latest_user_idx is None:
+        return start_idx
+    prior_assistant_idx = None
+    for idx in range(latest_user_idx - 1, -1, -1):
+        if _message_has_stable_assistant_reply_for_window(source[idx]):
+            prior_assistant_idx = idx
+            break
+    if prior_assistant_idx is None or prior_assistant_idx >= start_idx:
+        return start_idx
+    prior_user_idx = None
+    for idx in range(prior_assistant_idx - 1, -1, -1):
+        if isinstance(source[idx], dict) and str(source[idx].get("role") or "").lower() == "user":
+            prior_user_idx = idx
+            break
+    return prior_user_idx if prior_user_idx is not None else prior_assistant_idx
+
+
 def _tool_call_ids_in_messages(messages) -> set:
     """Collect tool-call IDs declared on renderable rows (assistant tool_calls /
     partial tool_calls / Anthropic tool_use content blocks) so trailing
@@ -8766,6 +8880,16 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
         if renderable_count >= limit:
             start_idx = idx
             break
+    if expand_renderable and msg_before is None:
+        semantic_start_idx = _cold_load_semantic_context_start(
+            source, start_idx, last_renderable_idx
+        )
+        # Keep the semantic prefix bounded in raw storage coordinates. A single
+        # active turn can contain thousands of hidden tool rows; pulling a very
+        # distant prior exchange into this response would defeat msg_limit and
+        # reintroduce an unbounded cold-load payload.
+        if end_idx - semantic_start_idx <= _COLD_LOAD_SEMANTIC_RAW_ROW_LIMIT:
+            start_idx = semantic_start_idx
     window = source[start_idx:end_idx]
     return window, start_idx
 
