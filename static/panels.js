@@ -7096,6 +7096,10 @@ async function switchToProfile(name) {
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
       await refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
     }
+    // The preference fetch above yields. A newer profile switch may have
+    // completed while this older one was waiting; do not let the stale
+    // continuation create/retag a session in the newer profile.
+    if (_switchGen !== _profileSwitchGeneration) return false;
 
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {

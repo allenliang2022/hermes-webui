@@ -118,6 +118,69 @@ eval(extractFunc('refreshReasoningPreferencesForRender'));
     }
 
 
+def test_superseded_profile_preference_wait_cannot_create_session_in_newer_profile():
+    source = f"""
+const panelsSrc = {PANELS_JS!r};
+function extractFunc(name) {{
+  const start = panelsSrc.indexOf('async function ' + name);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = panelsSrc.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < panelsSrc.length) {{
+    if (panelsSrc[i] === '{{') depth++;
+    else if (panelsSrc[i] === '}}') depth--;
+    i++;
+  }}
+  return panelsSrc.slice(start, i);
+}}
+global.S = {{
+  activeProfile:'default', activeProfileIsDefault:true,
+  session:{{session_id:'existing',profile:'default'}}, messages:[{{role:'user',content:'x'}}],
+}};
+global.window = {{}};
+global.localStorage = {{removeItem(){{}}}};
+global.$ = () => null;
+global.t = (_, name) => name || '';
+global.showToast = () => {{}};
+global.startGatewaySSE = () => {{}};
+global.applyBotName = () => {{}};
+global.renderSessionList = async () => {{}};
+global.syncTopbar = () => {{}};
+global._profileSwitchPanelLoad = async () => {{}};
+global._refreshProfileSwitchBackground = () => {{}};
+global.newSession = async () => {{ created.push(S.activeProfile); }};
+global.api = async (url, opts) => {{
+  if (url !== '/api/profile/switch') throw new Error('unexpected API ' + url);
+  const name = JSON.parse(opts.body).name;
+  return {{active:name,is_default:false}};
+}};
+const waits = [];
+global.refreshProfileTransitionReasoningChip = () => new Promise(resolve => waits.push(resolve));
+var _profileSwitchGeneration = 0;
+var _skillsData = null;
+var _workspaceList = null;
+const created = [];
+eval(extractFunc('switchToProfile'));
+(async () => {{
+  const first = switchToProfile('A');
+  while (waits.length < 1) await Promise.resolve();
+  const second = switchToProfile('B');
+  while (waits.length < 2) await Promise.resolve();
+  waits[1]();
+  const secondResult = await second;
+  waits[0]();
+  const firstResult = await first;
+  console.log(JSON.stringify({{active:S.activeProfile,created,firstResult,secondResult}}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    payload = json.loads(_run_node(source))
+    assert payload == {
+        "active": "B",
+        "created": ["B"],
+        "firstResult": False,
+        "secondResult": True,
+    }
+
+
 def test_valid_profile_query_switches_before_restore_and_cleans_url():
     source = _node_prelude() + """
 function applyUrl(rel) {
