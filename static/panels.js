@@ -7012,6 +7012,18 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    const _transitionOwner = _acceptProfileTransitionOwner(data.active || name, 'canonical');
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      await refreshProfileTransitionReasoningChip(
+        data.default_model,
+        data.default_model_provider,
+        _transitionOwner
+      );
+    }
+    if (
+      _switchGen !== _profileSwitchGeneration ||
+      !_isProfileTransitionOwner(_transitionOwner)
+    ) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
@@ -7093,14 +7105,6 @@ async function switchToProfile(name) {
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
     }
-    if (typeof refreshProfileTransitionReasoningChip === 'function') {
-      await refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
-    }
-    // The preference fetch above yields. A newer profile switch may have
-    // completed while this older one was waiting; do not let the stale
-    // continuation create/retag a session in the newer profile.
-    if (_switchGen !== _profileSwitchGeneration) return false;
-
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
       // Always store the persistent profile default — used for blank-page display
@@ -7119,6 +7123,7 @@ async function switchToProfile(name) {
             model: S.session.model,
             model_provider: S.session.model_provider||null,
           })});
+          if (!_isProfileTransitionOwner(_transitionOwner)) return false;
           S.session.workspace = data.default_workspace;
         } catch (_) {}
       }
@@ -7136,14 +7141,17 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7158,6 +7166,7 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7180,7 +7189,8 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7188,6 +7198,7 @@ async function switchToProfile(name) {
       if (S.session && S.session.workspace) {
         const dirLoad = loadDir('.');
         if (workspaceVisible) await dirLoad;
+        if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
         // New profile has no bound workspace — clear the up-front skeleton so it
         // doesn't strand (#4662 Opus gate).
@@ -7196,7 +7207,9 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     }
 
+    if (!_isProfileTransitionOwner(_transitionOwner)) return false;
     await _profileSwitchPanelLoad();
+    if (!_isProfileTransitionOwner(_transitionOwner)) return false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 

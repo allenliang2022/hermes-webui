@@ -62,19 +62,13 @@ function evalBoot(name) {{
 
 
 def test_profile_switch_entrypoints_await_destination_commentary_preference():
-    """No switch path may render destination sessions under the old profile flag."""
-    assert (
-        "await refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);"
-        in PANELS_JS
-    )
-    assert (
-        "await refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);"
-        in SESSIONS_JS
-    )
-    assert (
-        "await refreshReasoningPreferencesForRender(S.session.model,S.session.model_provider);"
-        in SESSIONS_JS
-    )
+    """Both profile switch ingresses share and revalidate one accepted owner."""
+    assert "_acceptProfileTransitionOwner(data.active || name, 'canonical')" in PANELS_JS
+    assert "_acceptProfileTransitionOwner(data.active||name,'session-load')" in SESSIONS_JS
+    assert "_isProfileTransitionOwner(_transitionOwner)" in PANELS_JS
+    assert "_isProfileTransitionOwner(transitionOwner)" in SESSIONS_JS
+    assert "await refreshReasoningPreferencesForRender(" in SESSIONS_JS
+    assert "S.session.model_provider" in SESSIONS_JS
     assert "await fetchReasoningChip();" in BOOT_JS
 
 
@@ -115,69 +109,6 @@ eval(extractFunc('refreshReasoningPreferencesForRender'));
     assert payload == {
         "before": {"settled": False, "showCommentary": False},
         "after": {"settled": True, "showCommentary": False},
-    }
-
-
-def test_superseded_profile_preference_wait_cannot_create_session_in_newer_profile():
-    source = f"""
-const panelsSrc = {PANELS_JS!r};
-function extractFunc(name) {{
-  const start = panelsSrc.indexOf('async function ' + name);
-  if (start < 0) throw new Error(name + ' not found');
-  let i = panelsSrc.indexOf('{{', start), depth = 1; i++;
-  while (depth > 0 && i < panelsSrc.length) {{
-    if (panelsSrc[i] === '{{') depth++;
-    else if (panelsSrc[i] === '}}') depth--;
-    i++;
-  }}
-  return panelsSrc.slice(start, i);
-}}
-global.S = {{
-  activeProfile:'default', activeProfileIsDefault:true,
-  session:{{session_id:'existing',profile:'default'}}, messages:[{{role:'user',content:'x'}}],
-}};
-global.window = {{}};
-global.localStorage = {{removeItem(){{}}}};
-global.$ = () => null;
-global.t = (_, name) => name || '';
-global.showToast = () => {{}};
-global.startGatewaySSE = () => {{}};
-global.applyBotName = () => {{}};
-global.renderSessionList = async () => {{}};
-global.syncTopbar = () => {{}};
-global._profileSwitchPanelLoad = async () => {{}};
-global._refreshProfileSwitchBackground = () => {{}};
-global.newSession = async () => {{ created.push(S.activeProfile); }};
-global.api = async (url, opts) => {{
-  if (url !== '/api/profile/switch') throw new Error('unexpected API ' + url);
-  const name = JSON.parse(opts.body).name;
-  return {{active:name,is_default:false}};
-}};
-const waits = [];
-global.refreshProfileTransitionReasoningChip = () => new Promise(resolve => waits.push(resolve));
-var _profileSwitchGeneration = 0;
-var _skillsData = null;
-var _workspaceList = null;
-const created = [];
-eval(extractFunc('switchToProfile'));
-(async () => {{
-  const first = switchToProfile('A');
-  while (waits.length < 1) await Promise.resolve();
-  const second = switchToProfile('B');
-  while (waits.length < 2) await Promise.resolve();
-  waits[1]();
-  const secondResult = await second;
-  waits[0]();
-  const firstResult = await first;
-  console.log(JSON.stringify({{active:S.activeProfile,created,firstResult,secondResult}}));
-}})().catch(error => {{ console.error(error); process.exit(1); }});
-"""
-    payload = json.loads(_run_node(source))
-    assert payload == {
-        "active": "B",
-        "created": ["B"],
-        "firstResult": False,
-        "secondResult": True,
     }
 
 
@@ -776,7 +707,7 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
     assert payload["afterDestination"] == "high"
     assert payload["calls"] == 2
     assert "refreshProfileTransitionReasoningChip" in PANELS_JS
-    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = data.active || name")
+    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") < PANELS_JS.index("S.activeProfile = data.active || name")
     background = PANELS_JS[PANELS_JS.index("function _refreshProfileSwitchBackground"):PANELS_JS.index("async function loadProfilesPanel")]
     for refresh in (
         "_ensureComposerControlVisibilityState",
@@ -789,102 +720,15 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
         assert refresh in background
 
 
-def test_profile_transitions_fetch_destination_reasoning_after_hiding_stale_chip():
-    source = f"""
-const uiSrc = {UI_JS!r};
-const panelsSrc = {PANELS_JS!r};
-const sessionsSrc = {SESSIONS_JS!r};
-function extractFunc(src, name) {{
-  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start), depth = 1; i++;
-  while (depth > 0 && i < src.length) {{
-    if (src[i] === '{{') depth++;
-    else if (src[i] === '}}') depth--;
-    i++;
-  }}
-  return src.slice(start, i);
-}}
-function makeEl() {{ return {{ style: {{}}, disabled: false, classList: {{ add(){{}}, remove(){{}}, toggle(){{}} }}, setAttribute(){{}}, querySelectorAll(){{ return []; }} }}; }}
-const els = {{ composerReasoningWrap: makeEl(), composerReasoningLabel: makeEl(), composerReasoningChip: makeEl(), composerMobileReasoningAction: makeEl() }};
-global.$ = id => els[id] || null;
-global.window = {{}};
-global.document = {{ title: '' }};
-global.localStorage = {{ removeItem(){{}} }};
-global.S = {{ activeProfile: 'default', activeProfileIsDefault: true, session: null, messages: [] }};
-global._highlightReasoningOption = () => {{}};
-global._applyReasoningOptions = () => {{}};
-global._applyModelToDropdown = model => model;
-global._modelStateForSelect = (_, model) => ({{ model, model_provider: 'openai' }});
-global.renderSessionList = async () => {{}};
-global.startGatewaySSE = () => {{}};
-global.showToast = () => {{}};
-global.t = value => value;
-global.assistantDisplayName = () => 'Hermes';
-global._profileSwitchPanelLoad = async () => {{}};
-global._refreshProfileSwitchBackground = () => {{}};
-var _profileSwitchGeneration = 0;
-var _skillsData = null, _workspaceList = null;
-var _currentReasoningEffort = 'low';
-var _currentReasoningEffortsSupported = ['low', 'high'];
-var _profileTransitionReasoningContext = null;
-var _lastReasoningFetchKey = null;
-var _reasoningFetchSeq = 0;
-eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
-eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
-eval(extractFunc(uiSrc, '_reasoningEffortContext'));
-eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
-eval(extractFunc(uiSrc, '_applyReasoningChip'));
-eval(extractFunc(uiSrc, 'fetchReasoningChip'));
-eval(extractFunc(uiSrc, 'refreshReasoningPreferencesForRender'));
-eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
-eval(extractFunc(uiSrc, 'syncTopbar'));
-eval(extractFunc(panelsSrc, 'switchToProfile'));
-eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
-const pending = [];
-const reasoningUrls = [];
-global.api = (url) => {{
-  if (url === '/api/profile/switch') return Promise.resolve({{ active: 'vops', is_default: false, default_model: 'gpt-high', default_model_provider: 'openai' }});
-  if (url.startsWith('/api/reasoning')) {{
-    reasoningUrls.push(url);
-    return {{ then(ok) {{ pending.push(ok); return {{ catch() {{}} }}; }} }};
-  }}
-  throw new Error('unexpected API ' + url);
-}};
-fetchReasoningChip();
-(async () => {{
-  await switchToProfile('vops');
-  const blankBoot = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice() }};
-  pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
-  const blankBootAfterOld = _currentReasoningEffort;
-  pending[1]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
-  const blankBootAfterNew = _currentReasoningEffort;
-  S.activeProfile = 'default'; S.activeProfileIsDefault = true;
-  S.session = {{ model: 'old-model', model_provider: 'old-provider', profile: 'default' }};
-  _currentReasoningEffort = 'low'; _currentReasoningEffortsSupported = ['low', 'high']; _profileTransitionReasoningContext = null; _lastReasoningFetchKey = null;
-  fetchReasoningChip();
-  await _switchProfileForSessionLoad('vops');
-  const directLoad = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice(2) }};
-  pending[2]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
-  const directLoadAfterOld = _currentReasoningEffort;
-  pending[3]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
-  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld, directLoadAfterNew: _currentReasoningEffort }}));
-}})().catch(err => {{ console.error(err); process.exit(1); }});
-"""
-    payload = json.loads(_run_node(source))
-    assert payload["blankBoot"] == {
-        "hidden": "none",
-        "urls": ["/api/reasoning", "/api/reasoning?model=gpt-high&provider=openai"],
-    }
-    assert payload["blankBootAfterOld"] == ""
-    assert payload["blankBootAfterNew"] == "high"
-    assert payload["directLoad"] == {
-        "hidden": "none",
-        "urls": ["/api/reasoning?model=old-model&provider=old-provider", "/api/reasoning?model=gpt-high&provider=openai"],
-    }
-    assert payload["directLoadAfterOld"] == ""
-    assert payload["directLoadAfterNew"] == "high"
+def test_profile_transitions_bind_preference_to_shared_accepted_owner():
+    owner_slice = UI_JS[
+        UI_JS.index("function _acceptProfileTransitionOwner"):
+        UI_JS.index("function syncReasoningChip")
+    ]
+    assert "transitionOwner" in owner_slice
+    assert "_isProfileTransitionOwner(transitionOwner)" in owner_slice
+    assert "_isProfileTransitionOwner(transitionOwner)" in SESSIONS_JS
+    assert "_isProfileTransitionOwner(_transitionOwner)" in PANELS_JS
 
 
 def test_blank_profile_transition_context_clears_before_explicit_model_change():

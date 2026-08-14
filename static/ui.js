@@ -5095,7 +5095,30 @@ let _lastReasoningFetchKey=null;
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
 
-function fetchReasoningChip(keyOverride){
+// One accepted owner shared by every profile-switch ingress. The canonical UI
+// switch and the session-recovery switch both POST /api/profile/switch, so
+// request-local generations cannot fence them from each other. A POST response
+// claims this owner before any profile/default/preference/SSE/DOM publication;
+// every awaited continuation must revalidate it.
+let _profileTransitionOwnerSeq=0;
+let _profileTransitionOwner=null;
+function _acceptProfileTransitionOwner(profile, source){
+  const owner=Object.freeze({
+    generation:++_profileTransitionOwnerSeq,
+    profile:String(profile||'default'),
+    source:String(source||'unknown'),
+  });
+  _profileTransitionOwner=owner;
+  return owner;
+}
+function _isProfileTransitionOwner(owner){
+  return !!owner&&owner===_profileTransitionOwner&&owner.generation===_profileTransitionOwnerSeq;
+}
+function _currentProfileTransitionOwner(){
+  return _profileTransitionOwner;
+}
+
+function fetchReasoningChip(keyOverride, transitionOwner){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
@@ -5105,20 +5128,24 @@ function fetchReasoningChip(keyOverride){
   return api('/api/reasoning'+key).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
     // apply, so an older in-flight GET can't poison the current chip (#4650).
-    if(seq!==_reasoningFetchSeq) return;
+    if(seq!==_reasoningFetchSeq) return false;
+    if(transitionOwner&&!_isProfileTransitionOwner(transitionOwner)) return false;
     window._showCommentary=!st||st.show_commentary!==false;
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+    return true;
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
     // nor clear a newer fetch's key. Only the latest dispatch clears the key so
     // routine syncs retry after a genuine transient failure.
-    if(seq!==_reasoningFetchSeq) return;
+    if(seq!==_reasoningFetchSeq) return false;
+    if(transitionOwner&&!_isProfileTransitionOwner(transitionOwner)) return false;
     _lastReasoningFetchKey=null;
     _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+    return false;
   });
 }
 
-function refreshReasoningPreferencesForRender(model, provider){
+function refreshReasoningPreferencesForRender(model, provider, transitionOwner){
   // Invalidate both the request cache and any older in-flight response, then
   // fail closed until the active profile's effective display preference is
   // known. Callers await this before rendering persisted/cached transcript.
@@ -5128,16 +5155,20 @@ function refreshReasoningPreferencesForRender(model, provider){
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
-  return fetchReasoningChip(params.size?'?'+params.toString():undefined);
+  return fetchReasoningChip(params.size?'?'+params.toString():undefined,transitionOwner);
 }
 
-function refreshProfileTransitionReasoningChip(model, provider){
-  _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
+function refreshProfileTransitionReasoningChip(model, provider, transitionOwner){
+  _profileTransitionReasoningContext={
+    profile:(transitionOwner&&transitionOwner.profile)||(S&&S.activeProfile)||'default',
+    model,
+    provider,
+  };
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
   _currentReasoningToggleSupported=undefined;
   _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
-  return refreshReasoningPreferencesForRender(model,provider);
+  return refreshReasoningPreferencesForRender(model,provider,transitionOwner);
 }
 
 function clearProfileTransitionReasoningContext(){

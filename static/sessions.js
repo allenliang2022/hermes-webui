@@ -1633,8 +1633,18 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  let transitionOwner=null;
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
+    transitionOwner=_acceptProfileTransitionOwner(data.active||name,'session-load');
+    if(typeof refreshProfileTransitionReasoningChip==='function'){
+      await refreshProfileTransitionReasoningChip(
+        data.default_model,
+        data.default_model_provider,
+        transitionOwner
+      );
+    }
+    if(!_isProfileTransitionOwner(transitionOwner)) return null;
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
@@ -1644,14 +1654,17 @@ async function _switchProfileForSessionLoad(profile){
     else localStorage.removeItem('hermes-webui-model');
     if(data.default_model) window._defaultModel=data.default_model;
     if(data.default_model_provider) window._activeProvider=data.default_model_provider;
-    if(typeof refreshProfileTransitionReasoningChip==='function'){
-      await refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
-    }
+    if(!_isProfileTransitionOwner(transitionOwner)) return null;
     if(typeof startGatewaySSE==='function') startGatewaySSE();
+    if(!_isProfileTransitionOwner(transitionOwner)) return null;
     if(typeof syncTopbar==='function') syncTopbar();
+    if(!_isProfileTransitionOwner(transitionOwner)) return null;
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     if(typeof renderSessionList==='function') await renderSessionList();
+    if(!_isProfileTransitionOwner(transitionOwner)) return null;
+    return transitionOwner;
   }catch(switchErr){
+    if(transitionOwner&&!_isProfileTransitionOwner(transitionOwner)) return null;
     // The switch POST failed, so we're still on the previous profile and its
     // caches are intact. Clear the up-front skeleton and re-render the real
     // list so the sidebar doesn't strand on the skeleton (the #4671 strand bug
@@ -1829,7 +1842,8 @@ async function loadSession(sid){
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
-        await _switchProfileForSessionLoad(profileMismatch.profile);
+        const transitionOwner=await _switchProfileForSessionLoad(profileMismatch.profile);
+        if(!transitionOwner) return;
         // Post-await stale-load guard (Codex): the profile switch above does a
         // network POST + session-list re-render, during which the user may have
         // navigated to a different session. If we no longer own the load, bail
@@ -1959,10 +1973,20 @@ async function loadSession(sid){
   // before the awaited display-preference refresh can yield to another action.
   S._pendingSessionToolsets=null;
   if(typeof refreshReasoningPreferencesForRender==='function'){
-    await refreshReasoningPreferencesForRender(S.session.model,S.session.model_provider);
+    const transitionOwner=typeof _currentProfileTransitionOwner==='function'
+      ? _currentProfileTransitionOwner()
+      : null;
+    await refreshReasoningPreferencesForRender(
+      S.session.model,
+      S.session.model_provider,
+      transitionOwner
+    );
     // A newer navigation can win while the preference request is in flight.
     // Do not render/cache this stale session under the newer profile/session.
-    if(!_isCurrentLoad()){
+    if(
+      !_isCurrentLoad() ||
+      (transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner))
+    ){
       _rearmActiveSessionStream();
       return;
     }
