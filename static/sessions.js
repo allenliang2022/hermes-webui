@@ -5682,11 +5682,17 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // renderSessionList(), so that render's payload is the first allowed to paint.
     if (_profileSwitchListEmbargo) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
-      _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen,transitionOwner};
+      _pendingSessionListPayload=transitionOwner
+        ? {gen:_gen,sessData,projData,unreadGen,transitionOwner}
+        : {gen:_gen,sessData,projData,unreadGen};
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData,{unreadGen,transitionOwner});
+    _applySessionListPayload(
+      sessData,
+      projData,
+      transitionOwner ? {unreadGen,transitionOwner} : {unreadGen}
+    );
   }catch(e){
     if(!transitionCurrent()) return;
     if (_gen !== _renderSessionListGen) return;
@@ -6033,7 +6039,10 @@ async function refreshSessionList(reason='manual', opts={}){
   }
   _sessionListRefreshInFlight = true;
   try{
-    await renderSessionList({deferWhileInteracting:!force,transitionOwner});
+    await renderSessionList({
+      deferWhileInteracting:!force,
+      ...(transitionOwner?{transitionOwner}:{}),
+    });
     if(transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner)) return;
     if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list');
   }finally{
