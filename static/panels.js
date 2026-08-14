@@ -890,12 +890,18 @@ function _appendCronProfileToggle(parent){
   parent.appendChild(wrap);
 }
 
-async function loadCronProfiles(){
+function _profilePanelTransitionCurrent(owner){
+  return !owner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(owner);
+}
+
+async function loadCronProfiles(transitionOwner){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
     const data = await api('/api/profiles');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return [];
     _cronProfilesCache = Array.isArray(data.profiles) ? data.profiles : [];
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return [];
     _cronProfilesCache = [];
   }
   return _cronProfilesCache;
@@ -982,11 +988,12 @@ function _cronGatewayNoticeHtml(status) {
   `;
 }
 
-async function loadCronGatewayNotice() {
+async function loadCronGatewayNotice(transitionOwner) {
   const box = $('cronGatewayNotice');
   if (!box) return;
   try {
     const status = await api('/api/gateway/status');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const html = _cronGatewayNoticeHtml(status);
     if (html) {
       box.innerHTML = html;
@@ -996,23 +1003,26 @@ async function loadCronGatewayNotice() {
       box.style.display = 'none';
     }
   } catch (_) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     box.innerHTML = '';
     box.style.display = 'none';
   }
 }
 
-async function loadCrons(animate) {
+async function loadCrons(animate, transitionOwner) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
-  loadCronGatewayNotice();
+  loadCronGatewayNotice(transitionOwner);
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
   }
   try {
-    await loadCronProfiles();
+    await loadCronProfiles(transitionOwner);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
@@ -1095,8 +1105,12 @@ async function loadCrons(animate) {
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+  } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
   finally {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
@@ -2665,7 +2679,7 @@ function _kanbanUnavailableHtml(err){
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
 }
 
-async function loadKanban(animate){
+async function loadKanban(animate, transitionOwner){
   const board = $('kanbanBoard');
   const list = $('kanbanList');
   try {
@@ -2673,10 +2687,13 @@ async function loadKanban(animate){
     // Resolve the active board before board-scoped requests. If another CLI or
     // tab archived the previous board, /boards can fall back to default instead
     // of leaving config/board pinned to a ghost slug.
-    await loadKanbanBoards();
+    await loadKanbanBoards(transitionOwner);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _kanbanApplyConfigDefaults(config);
     const filters = _kanbanCurrentFilters();
     const params = new URLSearchParams();
@@ -2687,6 +2704,7 @@ async function loadKanban(animate){
     if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
     const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
     const data = await api(path);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
     _kanbanBoard = data || {columns: []};
     if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
@@ -2702,7 +2720,8 @@ async function loadKanban(animate){
     } catch(_) {}
     _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
-    await loadKanbanStats();
+    await loadKanbanStats(transitionOwner);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
     // loadKanban() so the active board is resolved BEFORE board-scoped
     // requests fire. The previous tail-of-function refresh has been removed
@@ -2713,6 +2732,7 @@ async function loadKanban(animate){
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const html = _kanbanUnavailableHtml(e);
     if (board) board.innerHTML = html;
     if (list) list.innerHTML = html;
@@ -2721,9 +2741,10 @@ async function loadKanban(animate){
 
 function filterKanban(){ _kanbanRenderBoard(); }
 
-async function loadKanbanStats(){
+async function loadKanbanStats(transitionOwner){
   try {
     const stats = await api('/api/kanban/stats' + _kanbanBoardQuery());
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const el = $('kanbanStats');
     if (!el) return;
     const byStatus = (stats && stats.by_status) || {};
@@ -3870,7 +3891,7 @@ function _kanbanSetSavedBoard(slug){
   } catch(_) {}
 }
 
-async function loadKanbanBoards(){
+async function loadKanbanBoards(transitionOwner){
   // Fetches the boards list and updates the switcher UI. Best-effort —
   // failures hide the switcher rather than blocking the panel from rendering.
   const switcher = document.getElementById('kanbanBoardSwitcher');
@@ -3879,10 +3900,12 @@ async function loadKanbanBoards(){
   try {
     data = await api('/api/kanban/boards');
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     // Hide switcher on error so the user isn't stuck with a half-broken UI.
     switcher.hidden = true;
     return;
   }
+  if(!_profilePanelTransitionCurrent(transitionOwner)) return;
   const boards = (data && data.boards) || [];
   const serverCurrent = (data && data.current) || 'default';
   _kanbanBoardsList = boards;
@@ -4807,18 +4830,25 @@ async function clearConversation() {
 }
 
 // ── Skills panel ──
-async function loadSkills() {
-  if (_skillsData) { renderSkills(_skillsData); return; }
+async function loadSkills(transitionOwner) {
+  if (_skillsData) {
+    if(_profilePanelTransitionCurrent(transitionOwner)) renderSkills(_skillsData);
+    return;
+  }
   const box = $('skillsList');
   try {
     const data = await api('/api/skills');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _skillsData = data.skills || [];
     // Prune collapsed state to only keep categories present in fresh data,
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
     renderSkills(_skillsData);
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
+  } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 let _collapsedCats = new Set(); // persisted collapsed state across re-renders
@@ -5427,11 +5457,14 @@ function _renderMemoryEdit(section) {
   if (ta) ta.focus();
 }
 
-async function loadNotesSources(force) {
+async function loadNotesSources(force, transitionOwner) {
   if (_notesSourcesData && !force) return _notesSourcesData;
   try {
-    _notesSourcesData = await api('/api/notes/sources');
+    const data = await api('/api/notes/sources');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return null;
+    _notesSourcesData = data;
   } catch (e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return null;
     _notesSourcesData = {sources: [], automatic_recall_unchanged: true, error: e && e.message ? e.message : String(e)};
   }
   return _notesSourcesData;
@@ -5670,9 +5703,10 @@ function syncWorkspaceDisplays(){
   }
 }
 
-async function loadWorkspaceList(){
+async function loadWorkspaceList(transitionOwner){
   try{
     const data = await api('/api/workspaces');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return {workspaces:[],last:''};
     if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
     _workspaceList = data.workspaces || [];
     syncWorkspaceDisplays();
@@ -5931,10 +5965,11 @@ window.addEventListener('resize',()=>{
   if(dd&&dd.classList.contains('open')) _positionComposerWsDropdown();
 });
 
-async function loadWorkspacesPanel(){
+async function loadWorkspacesPanel(transitionOwner){
   const panel=$('workspacesPanel');
   if(!panel)return;
-  const data=await loadWorkspaceList();
+  const data=await loadWorkspaceList(transitionOwner);
+  if(!_profilePanelTransitionCurrent(transitionOwner)) return;
   renderWorkspacesPanel(data.workspaces);
 }
 
@@ -6529,7 +6564,8 @@ function _openProfileDropdownShell(){
   if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
 }
 
-async function _profileSwitchPanelLoad(){
+async function _profileSwitchPanelLoad(transitionOwner){
+  if(!_profilePanelTransitionCurrent(transitionOwner)) return;
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -6538,21 +6574,23 @@ async function _profileSwitchPanelLoad(){
   _editingCronId = null;
   _cronIsDuplicate = false;
   _clearCronDetail();
-  if (_currentPanel === 'skills') await loadSkills();
-  if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
-  if (_currentPanel === 'kanban') await loadKanban();
-  if (_currentPanel === 'profiles') await loadProfilesPanel();
-  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+  if (_currentPanel === 'skills') await loadSkills(transitionOwner);
+  if (_currentPanel === 'memory') await loadMemory(undefined,transitionOwner);
+  if (_currentPanel === 'tasks') await loadCrons(undefined,transitionOwner);
+  if (_currentPanel === 'kanban') await loadKanban(undefined,transitionOwner);
+  if (_currentPanel === 'profiles') await loadProfilesPanel(transitionOwner);
+  if (_currentPanel === 'workspaces') await loadWorkspacesPanel(transitionOwner);
 }
 
-function _refreshProfileSwitchBackground(gen){
+function _refreshProfileSwitchBackground(gen,transitionOwner){
   window._modelDropdownReady=null;
-  if (typeof window._ensureModelDropdownReady === 'function') {
-    Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+  if (typeof populateModelDropdown === 'function') {
+    const next=populateModelDropdown({freshness:'session_visit',transitionOwner});
+    window._modelDropdownReady=next;
+    Promise.resolve(next).catch(()=>{});
   }
-  Promise.resolve(loadWorkspaceList()).then(()=>{
-    if (gen !== _profileSwitchGeneration) return;
+  Promise.resolve(loadWorkspaceList(transitionOwner)).then(()=>{
+    if (gen !== _profileSwitchGeneration||!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (S.session && typeof syncTopbar === 'function') syncTopbar();
   }).catch(()=>{});
   // Reconcile per-profile sidebar tab visibility. hidden_tabs is a per-profile
@@ -6560,7 +6598,7 @@ function _refreshProfileSwitchBackground(gen){
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
   Promise.resolve(api('/api/settings')).then(function(s){
-    if (gen !== _profileSwitchGeneration) return;
+    if (gen !== _profileSwitchGeneration||!_profilePanelTransitionCurrent(transitionOwner)) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
     var order = (s && Array.isArray(s.tab_order)) ? s.tab_order : [];
@@ -6582,11 +6620,12 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
-async function loadProfilesPanel() {
+async function loadProfilesPanel(transitionOwner) {
   const panel = $('profilesPanel');
   if (!panel) return;
   try {
     const data = await api('/api/profiles');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _profilesCache = data;
     _profileDropdownWriteStoredCache(data);
     panel.innerHTML = '';
@@ -6656,6 +6695,7 @@ async function loadProfilesPanel() {
       else _clearProfileDetail();
     }
   } catch (e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
 }
@@ -7208,9 +7248,9 @@ async function switchToProfile(name) {
     }
 
     if (!_isProfileTransitionOwner(_transitionOwner)) return false;
-    await _profileSwitchPanelLoad();
+    await _profileSwitchPanelLoad(_transitionOwner);
     if (!_isProfileTransitionOwner(_transitionOwner)) return false;
-    _refreshProfileSwitchBackground(_switchGen);
+    _refreshProfileSwitchBackground(_switchGen,_transitionOwner);
     return true;
 
   } catch (e) {
@@ -7399,19 +7439,21 @@ async function deleteProfile(name) {
 }
 
 // ── Memory panel ──
-async function loadMemory(force) {
+async function loadMemory(force, transitionOwner) {
   const panel = $('memoryPanel');
   try {
     const memoryUrl = S.session && S.session.session_id
       ? `/api/memory?session_id=${encodeURIComponent(S.session.session_id)}`
       : '/api/memory';
     const data = await api(memoryUrl);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _memoryData = data;
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
     }
     if (_currentMemorySection === 'external_notes') {
-      await loadNotesSources(!!force);
+      await loadNotesSources(!!force,transitionOwner);
+      if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     }
     if (panel) {
       panel.innerHTML = '';
@@ -7432,6 +7474,7 @@ async function loadMemory(force) {
       _renderMemoryDetail(_currentMemorySection);
     }
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (panel) panel.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
 }

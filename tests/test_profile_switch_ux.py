@@ -97,7 +97,7 @@ class TestParallelizedFetches:
     def test_workspace_refresh_in_background_and_model_catalog_lazy(self):
         """Workspace refresh should run behind completion; model catalog waits for picker open."""
         fn = self._get_switch_fn()
-        assert "_refreshProfileSwitchBackground(_switchGen)" in fn, (
+        assert "_refreshProfileSwitchBackground(_switchGen,_transitionOwner)" in fn, (
             "switchToProfile() must schedule non-visible refreshes after the switch."
         )
         assert "window._modelDropdownReady=null" in self.JS
@@ -119,7 +119,7 @@ class TestParallelizedFetches:
     def test_apply_steps_after_promise_all(self):
         """Model defaults must apply before background catalog refresh starts."""
         fn = self._get_switch_fn()
-        background_idx = fn.find("_refreshProfileSwitchBackground(_switchGen)")
+        background_idx = fn.find("_refreshProfileSwitchBackground(_switchGen,_transitionOwner)")
         apply_model_idx = fn.find("S._pendingProfileModel = modelToUse")
         assert apply_model_idx != -1
         assert background_idx != -1

@@ -3386,6 +3386,8 @@ function _applySessionModelFallback(sel){
 async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
+  const transitionOwner=opts&&opts.transitionOwner;
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
   // `_activeProvider` is refreshed from the /api/models response below.
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
   if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
@@ -3396,6 +3398,7 @@ async function populateModelDropdown(opts={}){
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
       if(customRedirectIfUnauth(_modelsRes)) return;
@@ -3403,6 +3406,7 @@ async function populateModelDropdown(opts={}){
     // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
@@ -3516,6 +3520,7 @@ async function populateModelDropdown(opts={}){
     }
   }catch(e){
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
     if(typeof syncModelChip==='function') syncModelChip();

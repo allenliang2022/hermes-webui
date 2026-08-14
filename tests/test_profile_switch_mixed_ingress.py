@@ -178,3 +178,79 @@ async function preferenceOwnerFenceWithoutSequenceHelp(){{
         "currentOwner": "B",
         "ownerB": "B",
     }
+
+
+def test_stale_profile_panel_response_cannot_publish_cache_or_dom():
+    source = f"""
+const uiSrc={UI_JS!r},panelsSrc={PANELS_JS!r};
+function extractFunc(src,name){{
+  const marker='function '+name,asyncMarker='async function '+name;
+  const start=src.includes(asyncMarker)?src.indexOf(asyncMarker):src.indexOf(marker);
+  if(start<0)throw new Error(name+' not found');
+  let i=src.indexOf('{{',start),depth=1;i++;
+  while(depth>0&&i<src.length){{if(src[i]==='{{')depth++;else if(src[i]==='}}')depth--;i++;}}
+  return src.slice(start,i);
+}}
+var _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+eval(extractFunc(uiSrc,'_acceptProfileTransitionOwner'));
+eval(extractFunc(uiSrc,'_isProfileTransitionOwner'));
+eval(extractFunc(panelsSrc,'_profilePanelTransitionCurrent'));
+eval(extractFunc(panelsSrc,'loadSkills'));
+let resolveSkills;
+global.api=()=>new Promise(resolve=>{{resolveSkills=resolve;}});
+global.$=()=>({{innerHTML:''}});
+global.renderSkills=skills=>published.push(skills.map(s=>s.name));
+var _skillsData=null;
+var _collapsedCats=new Set();
+const published=[];
+(async()=>{{
+  const ownerB=_acceptProfileTransitionOwner('B','canonical');
+  const pending=loadSkills(ownerB);
+  const ownerA=_acceptProfileTransitionOwner('A','session-load');
+  resolveSkills({{skills:[{{name:'B-only',category:'test'}}]}});
+  await pending;
+  console.log(JSON.stringify({{
+    currentOwner:_profileTransitionOwner.profile,
+    ownerA:ownerA.profile,
+    cache:_skillsData,
+    published,
+  }}));
+}})().catch(e=>{{console.error(e);process.exit(1);}});
+"""
+    assert _run_node(source) == {
+        "currentOwner": "A",
+        "ownerA": "A",
+        "cache": None,
+        "published": [],
+    }
+
+
+def test_every_profile_panel_loader_fences_async_publication():
+    def function_source(source: str, name: str) -> str:
+        markers = (f"async function {name}", f"function {name}")
+        start = next((source.index(m) for m in markers if m in source), -1)
+        assert start >= 0, name
+        params_end = source.index(")", start)
+        brace = source.index("{", params_end)
+        depth = 1
+        pos = brace + 1
+        while depth and pos < len(source):
+            if source[pos] == "{":
+                depth += 1
+            elif source[pos] == "}":
+                depth -= 1
+            pos += 1
+        return source[start:pos]
+
+    for name in (
+        "loadSkills", "loadCronProfiles", "loadCrons", "loadKanban",
+        "loadKanbanStats", "loadKanbanBoards", "loadNotesSources",
+        "loadMemory", "loadWorkspaceList", "loadWorkspacesPanel",
+        "loadProfilesPanel", "_profileSwitchPanelLoad",
+        "_refreshProfileSwitchBackground",
+    ):
+        assert "_profilePanelTransitionCurrent" in function_source(PANELS_JS, name), name
+
+    model_loader = function_source(UI_JS, "populateModelDropdown")
+    assert "transitionOwner" in model_loader
+    assert "transitionCurrent()" in model_loader

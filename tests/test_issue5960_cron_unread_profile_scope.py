@@ -76,6 +76,12 @@ let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-profile-job']);
 global.S={{activeProfile:'default'}};
 global.api=async()=>({{active:'alternate',is_default:false}});
+let _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+function _acceptProfileTransitionOwner(profile,source){{
+  _profileTransitionOwner={{generation:++_profileTransitionOwnerSeq,profile,source}};
+  return _profileTransitionOwner;
+}}
+function _isProfileTransitionOwner(owner){{ return owner===_profileTransitionOwner; }}
 global.localStorage={{removeItem(){{}}}};
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _clearCronSessionCompletionUnreadForInactiveProfiles(){{}}
@@ -185,6 +191,12 @@ let renders=0;
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global._allSessions=[];
 global.api=async()=>({{active:'profile-b',is_default:false}});
+let _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+function _acceptProfileTransitionOwner(profile,source){{
+  _profileTransitionOwner={{generation:++_profileTransitionOwnerSeq,profile,source}};
+  return _profileTransitionOwner;
+}}
+function _isProfileTransitionOwner(owner){{ return owner===_profileTransitionOwner; }}
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 global.renderSessionListFromCache=()=>{{ renders+=1; }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
