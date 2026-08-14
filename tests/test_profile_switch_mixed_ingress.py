@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
@@ -72,10 +74,13 @@ var _profileSwitchGeneration=0;
 var _skillsData=null,_workspaceList=null;
 var _currentReasoningEffort=null,_currentReasoningEffortsSupported=null,_currentReasoningToggleSupported=undefined;
 var _profileTransitionReasoningContext=null,_lastReasoningFetchKey=null,_reasoningFetchSeq=0;
-var _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+var _profileTransitionOwnerSeq=0,_profileTransitionOwner=null,_profileTransitionPostTail=Promise.resolve();
+eval(extractFunc(uiSrc,'_beginProfileTransitionOwner'));
 eval(extractFunc(uiSrc,'_acceptProfileTransitionOwner'));
+eval(extractFunc(uiSrc,'_cancelProfileTransitionOwner'));
 eval(extractFunc(uiSrc,'_isProfileTransitionOwner'));
 eval(extractFunc(uiSrc,'_currentProfileTransitionOwner'));
+eval(extractFunc(uiSrc,'_postProfileTransition'));
 eval(extractFunc(uiSrc,'fetchReasoningChip'));
 eval(extractFunc(uiSrc,'refreshReasoningPreferencesForRender'));
 eval(extractFunc(uiSrc,'refreshProfileTransitionReasoningChip'));
@@ -102,25 +107,28 @@ async function scenario(finalOwner){{
     if(url.startsWith('/api/reasoning')){{const model=new URL('https://x'+url).searchParams.get('model'),d=deferred();prefs.set(model,d);return d.promise;}}
     throw new Error('unexpected API '+url);
   }};
-  const canonical=switchToProfile('B');
-  const recovery=_switchProfileForSessionLoad('A');
-  await waitFor(()=>posts.size===2,'both profile POSTs');
+  let canonical,recovery;
+  if(finalOwner==='A'){{
+    canonical=switchToProfile('B');
+    await waitFor(()=>posts.has('B'),'B profile POST');
+    recovery=_switchProfileForSessionLoad('A');
+  }}else{{
+    recovery=_switchProfileForSessionLoad('A');
+    await waitFor(()=>posts.has('A'),'A profile POST');
+    canonical=switchToProfile('B');
+  }}
   if(finalOwner==='A'){{
     posts.get('B').resolve({{active:'B',is_default:false,default_model:'B-model'}});
-    await waitFor(()=>prefs.has('B-model'),'B preference request');
+    await waitFor(()=>posts.has('A'),'A profile POST');
     posts.get('A').resolve({{active:'A',is_default:false,default_model:'A-model'}});
     await waitFor(()=>prefs.has('A-model'),'A preference request');
     prefs.get('A-model').resolve({{show_commentary:false,reasoning_effort:''}});
-    await Promise.resolve();
-    prefs.get('B-model').resolve({{show_commentary:true,reasoning_effort:''}});
   }}else{{
     posts.get('A').resolve({{active:'A',is_default:false,default_model:'A-model'}});
-    await waitFor(()=>prefs.has('A-model'),'A preference request');
+    await waitFor(()=>posts.has('B'),'B profile POST');
     posts.get('B').resolve({{active:'B',is_default:false,default_model:'B-model'}});
     await waitFor(()=>prefs.has('B-model'),'B preference request');
     prefs.get('B-model').resolve({{show_commentary:true,reasoning_effort:''}});
-    await Promise.resolve();
-    prefs.get('A-model').resolve({{show_commentary:false,reasoning_effort:''}});
   }}
   const [canonicalResult,recoveryResult]=await Promise.all([canonical,recovery]);
   return{{finalOwner,active:S.activeProfile,defaultModel:window._defaultModel,commentary:window._showCommentary,session:S.session?.session_id,canonicalResult,recoveryOwner:recoveryResult?.profile||null,events}};
@@ -130,9 +138,11 @@ async function preferenceOwnerFenceWithoutSequenceHelp(){{
   global.window={{_showCommentary:'sentinel'}};
   const response=deferred();
   global.api=()=>response.promise;
-  const ownerA=_acceptProfileTransitionOwner('A','test-A');
+  const ownerA=_beginProfileTransitionOwner('A','test-A');
+  _acceptProfileTransitionOwner(ownerA,'A');
   const pending=fetchReasoningChip('?model=A-model',ownerA);
-  const ownerB=_acceptProfileTransitionOwner('B','test-B');
+  const ownerB=_beginProfileTransitionOwner('B','test-B');
+  _acceptProfileTransitionOwner(ownerB,'B');
   response.resolve({{show_commentary:true,reasoning_effort:''}});
   const applied=await pending;
   return{{applied,commentary:window._showCommentary,currentOwner:_currentProfileTransitionOwner()?.profile,ownerB:ownerB.profile}};
@@ -191,7 +201,8 @@ function extractFunc(src,name){{
   while(depth>0&&i<src.length){{if(src[i]==='{{')depth++;else if(src[i]==='}}')depth--;i++;}}
   return src.slice(start,i);
 }}
-var _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+var _profileTransitionOwnerSeq=0,_profileTransitionOwner=null,_profileTransitionPostTail=Promise.resolve();
+eval(extractFunc(uiSrc,'_beginProfileTransitionOwner'));
 eval(extractFunc(uiSrc,'_acceptProfileTransitionOwner'));
 eval(extractFunc(uiSrc,'_isProfileTransitionOwner'));
 eval(extractFunc(panelsSrc,'_profilePanelTransitionCurrent'));
@@ -204,9 +215,11 @@ var _skillsData=null;
 var _collapsedCats=new Set();
 const published=[];
 (async()=>{{
-  const ownerB=_acceptProfileTransitionOwner('B','canonical');
+  const ownerB=_beginProfileTransitionOwner('B','canonical');
+  _acceptProfileTransitionOwner(ownerB,'B');
   const pending=loadSkills(ownerB);
-  const ownerA=_acceptProfileTransitionOwner('A','session-load');
+  const ownerA=_beginProfileTransitionOwner('A','session-load');
+  _acceptProfileTransitionOwner(ownerA,'A');
   resolveSkills({{skills:[{{name:'B-only',category:'test'}}]}});
   await pending;
   console.log(JSON.stringify({{
@@ -254,3 +267,17 @@ def test_every_profile_panel_loader_fences_async_publication():
     model_loader = function_source(UI_JS, "populateModelDropdown")
     assert "transitionOwner" in model_loader
     assert "transitionCurrent()" in model_loader
+
+    live_models = function_source(UI_JS, "_fetchLiveModels")
+    assert "transitionOwner" in live_models
+    assert "transitionCurrent()" in live_models
+
+    for name in ("newSession", "_runRenderSessionListRefresh", "loadSession", "_ensureMessagesLoaded"):
+        nested = function_source(SESSIONS_JS, name)
+        assert "transitionOwner" in nested, name
+
+    workspace_loader = function_source(WORKSPACE_JS, "loadDir")
+    assert "transitionOwner" in workspace_loader
+    assert "transitionCurrent()" in workspace_loader
+
+    assert "transitionOwner" in BOOT_JS[BOOT_JS.index("const _hydrateModelDropdown="):BOOT_JS.index("window._modelDropdownReady=null", BOOT_JS.index("const _hydrateModelDropdown="))]

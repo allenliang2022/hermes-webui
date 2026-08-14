@@ -3513,7 +3513,7 @@ async function populateModelDropdown(opts={}){
     }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
-    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq, transitionOwner);
     if(willRetry){
       _modelCatalogFallbackRetried=true;
       populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
@@ -3533,6 +3533,7 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+const _liveModelFetchPendingOwner=new Map();
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -3633,28 +3634,36 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, transitionOwner=null){
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+  if(!transitionCurrent()) return;
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
+  const pendingToken={requestSeq,transitionOwner};
   _liveModelFetchPending.add(provider);
+  _liveModelFetchPendingOwner.set(provider,pendingToken);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
@@ -3663,7 +3672,10 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    if(_liveModelFetchPendingOwner.get(provider)===pendingToken){
+      _liveModelFetchPendingOwner.delete(provider);
+      _liveModelFetchPending.delete(provider);
+    }
   }
 }
 
@@ -5100,27 +5112,57 @@ let _lastReasoningFetchKey=null;
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
 
-// One accepted owner shared by every profile-switch ingress. The canonical UI
-// switch and the session-recovery switch both POST /api/profile/switch, so
-// request-local generations cannot fence them from each other. A POST response
-// claims this owner before any profile/default/preference/SSE/DOM publication;
-// every awaited continuation must revalidate it.
+// One transition epoch shared by every profile-switch ingress. Ownership starts
+// at invocation (before the POST), so a later ingress also fences rejection and
+// cleanup from an earlier one. The same object is marked accepted after its POST
+// succeeds and is threaded through every nested async publisher.
 let _profileTransitionOwnerSeq=0;
 let _profileTransitionOwner=null;
-function _acceptProfileTransitionOwner(profile, source){
-  const owner=Object.freeze({
+let _profileTransitionPostTail=Promise.resolve();
+function _beginProfileTransitionOwner(profile, source){
+  const owner={
     generation:++_profileTransitionOwnerSeq,
     profile:String(profile||'default'),
     source:String(source||'unknown'),
-  });
+    accepted:false,
+  };
   _profileTransitionOwner=owner;
   return owner;
+}
+function _acceptProfileTransitionOwner(owner, profile){
+  if(!_isProfileTransitionOwner(owner)) return null;
+  owner.profile=String(profile||owner.profile||'default');
+  owner.accepted=true;
+  return owner;
+}
+function _cancelProfileTransitionOwner(owner){
+  if(!_isProfileTransitionOwner(owner)) return false;
+  _profileTransitionOwner=null;
+  return true;
 }
 function _isProfileTransitionOwner(owner){
   return !!owner&&owner===_profileTransitionOwner&&owner.generation===_profileTransitionOwnerSeq;
 }
 function _currentProfileTransitionOwner(){
   return _profileTransitionOwner;
+}
+function _currentProfileTransitionEpoch(){
+  return _profileTransitionOwnerSeq;
+}
+function _postProfileTransition(owner){
+  const invoke=()=>{
+    if(!_isProfileTransitionOwner(owner)) return null;
+    return api('/api/profile/switch',{
+      method:'POST',
+      body:JSON.stringify({name:owner.profile}),
+      timeoutToast:false,
+    });
+  };
+  const result=_profileTransitionPostTail.then(invoke,invoke);
+  // Keep the serialization rail alive after both success and rejection. A
+  // later invocation must issue its Set-Cookie response last.
+  _profileTransitionPostTail=result.then(()=>undefined,()=>undefined);
+  return result;
 }
 
 function fetchReasoningChip(keyOverride, transitionOwner){

@@ -6587,6 +6587,7 @@ function _refreshProfileSwitchBackground(gen,transitionOwner){
   if (typeof populateModelDropdown === 'function') {
     const next=populateModelDropdown({freshness:'session_visit',transitionOwner});
     window._modelDropdownReady=next;
+    window._modelDropdownReadyOwner=transitionOwner;
     Promise.resolve(next).catch(()=>{});
   }
   Promise.resolve(loadWorkspaceList(transitionOwner)).then(()=>{
@@ -6985,6 +6986,7 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  const _transitionOwner = _beginProfileTransitionOwner(name, 'canonical');
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7050,9 +7052,10 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
-    const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    const data = await _postProfileTransition(_transitionOwner);
     if (_switchGen !== _profileSwitchGeneration) return false;
-    const _transitionOwner = _acceptProfileTransitionOwner(data.active || name, 'canonical');
+    if (!data) return false;
+    if (!_acceptProfileTransitionOwner(_transitionOwner, data.active || name)) return false;
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
       await refreshProfileTransitionReasoningChip(
         data.default_model,
@@ -7179,7 +7182,7 @@ async function switchToProfile(name) {
       // cookie switch. Avoid creating/retagging an intermediate blank chat.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
+      await renderSessionList({transitionOwner:_transitionOwner});
       if (_switchGen !== _profileSwitchGeneration) return false;
       if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
@@ -7189,7 +7192,7 @@ async function switchToProfile(name) {
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (!_isProfileTransitionOwner(_transitionOwner)) return false;
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, transitionOwner:_transitionOwner});
       if (_switchGen !== _profileSwitchGeneration) return false;
       if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
@@ -7199,8 +7202,8 @@ async function switchToProfile(name) {
       // single-threaded so nothing interleaves between this clear and the call, making
       // this render the first allowed to paint the new profile's rows.
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
-      // Re-check generation after the awaited list render: a newer switch can be
+      await renderSessionList({transitionOwner:_transitionOwner});
+      // Re-check generation after the awaited list render
       // started while renderSessionList() is in flight, and without this guard
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
@@ -7228,7 +7231,7 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
+      await renderSessionList({transitionOwner:_transitionOwner});
       if (_switchGen !== _profileSwitchGeneration) return false;
       if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
@@ -7236,7 +7239,7 @@ async function switchToProfile(name) {
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
       if (S.session && S.session.workspace) {
-        const dirLoad = loadDir('.');
+        const dirLoad = loadDir('.',{transitionOwner:_transitionOwner});
         if (workspaceVisible) await dirLoad;
         if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
@@ -7255,13 +7258,14 @@ async function switchToProfile(name) {
 
   } catch (e) {
     // Revert the optimistic name update on error
-    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
+    const _ownsFailure = _switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner);
+    if (_ownsFailure && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (_ownsFailure && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
+    if (_ownsFailure) showToast(t('switch_failed') + e.message);
     // The switch failed, so we're still on the previous profile and its caches
     // are intact — restore the real list/tree so the loading skeletons we showed
     // up front don't strand. (#4662)
-    if (_switchGen === _profileSwitchGeneration) {
+    if (_ownsFailure) {
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
       // rather than strand the up-front skeleton (#4671). Lift the embargo too so the
@@ -7270,24 +7274,27 @@ async function switchToProfile(name) {
       _sessionListSkeletonActive = false;
       if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
       if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
-        loadDir('.');
+        loadDir('.',{transitionOwner:_transitionOwner});
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
         // clear the up-front workspace skeleton so it doesn't strand on a switch
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
       }
+      if (_chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+      if (_titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
+      _cancelProfileTransitionOwner(_transitionOwner);
     }
     return false;
   } finally {
     // Always remove loading indicator regardless of success or failure
-    if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
-    if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner) && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner) && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
     // #4671 safety net: guarantee the session-list embargo is lifted on EVERY exit of the
     // current switch (success paths clear it before their authoritative render; this covers
     // early-returns/throws between skeleton-show and those clears so it can't freeze the
     // sidebar). Guarded by _switchGen so a superseded switch can't lift a newer switch's embargo.
-    if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
+    if (_switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner) && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
   }

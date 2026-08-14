@@ -1277,6 +1277,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 }
 
 let _newSessionInFlight=null;
+let _newSessionInFlightOwner=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
@@ -1378,12 +1379,18 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  const transitionOwner=options&&options.transitionOwner||null;
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+  if(!transitionCurrent()) return false;
   if(_newSessionInFlight){
-    if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
-    return _newSessionInFlight;
+    if(!transitionOwner||_newSessionInFlightOwner===transitionOwner){
+      if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
+      return _newSessionInFlight;
+    }
   }
   _setNewSessionPending(true);
-  _newSessionInFlight=(async()=>{
+  const thisNewSessionPromise=(async()=>{
+    if(!transitionCurrent()) return false;
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1482,6 +1489,7 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(!transitionCurrent()) return false;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1551,21 +1559,28 @@ async function newSession(flash, options={}){
     // refresh right after paint unless this caller explicitly needs it loaded
     // before continuing (profile/default-workspace binding path).
     if(options&&options.awaitWorkspaceLoad){
-      await loadDir('.');
+      await loadDir('.',{transitionOwner});
+      if(!transitionCurrent()) return false;
     }else if(typeof _deferWorkspaceRefreshForSession==='function'){
-      _deferWorkspaceRefreshForSession(S.session.session_id);
+      _deferWorkspaceRefreshForSession(S.session.session_id,{transitionOwner});
     }else{
-      const _dirP=loadDir('.');
+      const _dirP=loadDir('.',{transitionOwner});
       if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
     }
     // Refresh sidebar to include the newly created session (#3874).
-    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{transitionOwner})).catch(()=>{})}
+    return true;
   })();
+  _newSessionInFlight=thisNewSessionPromise;
+  _newSessionInFlightOwner=transitionOwner;
   try{
-    return await _newSessionInFlight;
+    return await thisNewSessionPromise;
   }finally{
-    _newSessionInFlight=null;
-    _setNewSessionPending(false);
+    if(_newSessionInFlight===thisNewSessionPromise){
+      _newSessionInFlight=null;
+      _newSessionInFlightOwner=null;
+      _setNewSessionPending(false);
+    }
   }
 }
 
@@ -1630,13 +1645,14 @@ async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
+  const transitionOwner=_beginProfileTransitionOwner(name,'session-load');
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
-  let transitionOwner=null;
   try{
-    const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
-    transitionOwner=_acceptProfileTransitionOwner(data.active||name,'session-load');
+    const data=await _postProfileTransition(transitionOwner);
+    if(!data) return null;
+    if(!_acceptProfileTransitionOwner(transitionOwner,data.active||name)) return null;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       await refreshProfileTransitionReasoningChip(
         data.default_model,
@@ -1660,11 +1676,11 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof syncTopbar==='function') syncTopbar();
     if(!_isProfileTransitionOwner(transitionOwner)) return null;
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    if(typeof renderSessionList==='function') await renderSessionList();
+    if(typeof renderSessionList==='function') await renderSessionList({transitionOwner});
     if(!_isProfileTransitionOwner(transitionOwner)) return null;
     return transitionOwner;
   }catch(switchErr){
-    if(transitionOwner&&!_isProfileTransitionOwner(transitionOwner)) return null;
+    if(!_isProfileTransitionOwner(transitionOwner)) return null;
     // The switch POST failed, so we're still on the previous profile and its
     // caches are intact. Clear the up-front skeleton and re-render the real
     // list so the sidebar doesn't strand on the skeleton (the #4671 strand bug
@@ -1675,12 +1691,31 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    _cancelProfileTransitionOwner(transitionOwner);
     throw switchErr;
   }
 }
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  const transitionOwner=opts.transitionOwner||(
+    typeof _currentProfileTransitionOwner==='function'
+      ? _currentProfileTransitionOwner()
+      : null
+  );
+  const transitionEpoch=typeof _currentProfileTransitionEpoch==='function'
+    ? _currentProfileTransitionEpoch()
+    : (transitionOwner&&transitionOwner.generation)||0;
+  const transitionProfile=transitionOwner&&transitionOwner.profile;
+  const transitionCurrent=()=>{
+    const epochCurrent=typeof _currentProfileTransitionEpoch!=='function'||_currentProfileTransitionEpoch()===transitionEpoch;
+    if(!transitionOwner) return epochCurrent;
+    return epochCurrent&&
+      (typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner))&&
+      transitionOwner.profile===transitionProfile&&
+      transitionOwner.accepted===true;
+  };
+  if(!transitionCurrent()) return;
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
@@ -1726,7 +1761,8 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentNavigation = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentLoad = () => transitionCurrent() && _isCurrentNavigation();
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -1849,12 +1885,12 @@ async function loadSession(sid){
         // navigated to a different session. If we no longer own the load, bail
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
-        if (!_isCurrentLoad()) {
+        if (!_isCurrentNavigation() || (typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner))) {
           _rearmActiveSessionStream();
           return;
         }
-        if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+        if (_isCurrentNavigation()) _loadingSessionId = null;
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true,transitionOwner});
       }catch(switchErr){
         e=switchErr;
       }
@@ -1966,16 +2002,13 @@ async function loadSession(sid){
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true,transitionOwner});
   }
   S.session=data.session;
   // Loading a real existing session abandons any pre-session toolset override
   // before the awaited display-preference refresh can yield to another action.
   S._pendingSessionToolsets=null;
   if(typeof refreshReasoningPreferencesForRender==='function'){
-    const transitionOwner=typeof _currentProfileTransitionOwner==='function'
-      ? _currentProfileTransitionOwner()
-      : null;
     await refreshReasoningPreferencesForRender(
       S.session.model,
       S.session.model_provider,
@@ -1998,12 +2031,12 @@ async function loadSession(sid){
     if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){
       Promise.resolve().then(()=>{
         if(!isActiveModelRefreshSession()) return undefined;
-        return window._startBootModelDropdown();
+        return window._startBootModelDropdown(transitionOwner);
       }).catch(()=>{});
     }else{
       const modelRefreshPromise=_deferSessionSideEffect(modelRefreshSid,()=>{
         if(!isActiveModelRefreshSession()) return undefined;
-        return populateModelDropdown({freshness:'session_visit'});
+        return populateModelDropdown({freshness:'session_visit',transitionOwner});
       }).catch(()=>{});
       if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
     }
@@ -2024,7 +2057,7 @@ async function loadSession(sid){
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
-  _resolveSessionModelForDisplaySoon(sid);
+  _resolveSessionModelForDisplaySoon(sid,transitionOwner);
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
   if(typeof syncTopbar==='function') syncTopbar();
@@ -2134,7 +2167,7 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, transitionOwner});
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2227,7 +2260,7 @@ async function loadSession(sid){
       const liveTurn=document.getElementById('liveAssistantTurn');
       if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
-    _deferWorkspaceRefreshForSession(sid);
+    _deferWorkspaceRefreshForSession(sid,{transitionOwner});
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -2240,7 +2273,7 @@ async function loadSession(sid){
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, transitionOwner});
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2326,7 +2359,7 @@ async function loadSession(sid){
         if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
         else appendThinking();
       }
-      _deferWorkspaceRefreshForSession(sid);
+      _deferWorkspaceRefreshForSession(sid,{transitionOwner});
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -2344,7 +2377,7 @@ async function loadSession(sid){
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
       // with file-tree / git badge IO.
-      _deferWorkspaceRefreshForSession(sid);
+      _deferWorkspaceRefreshForSession(sid,{transitionOwner});
     }
   }
 
@@ -2972,11 +3005,14 @@ function _deferWorkspaceRefreshForSession(sid, opts={}){
   },150);
 }
 
-function _resolveSessionModelForDisplaySoon(sid){
+function _resolveSessionModelForDisplaySoon(sid,transitionOwner){
   if(!sid) return;
   _deferSessionSideEffect(sid,async()=>{
+    const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+    if(!transitionCurrent()) return;
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1`);
+      if(!transitionCurrent()) return;
       const model=data&&data.session&&data.session.model;
       const provider=data&&data.session&&data.session.model_provider;
       if(!model||!S.session||S.session.session_id!==sid) return;
@@ -3138,7 +3174,12 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
+  const transitionOwner=opts.transitionOwner||null;
+  const _ownsTransition=()=>!transitionOwner||(
+    (typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner))&&
+    transitionOwner.accepted===true
+  );
+  const _ownsLoad = () => _ownsTransition() && _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
   if (!_ownsLoad()) return;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
@@ -5311,10 +5352,12 @@ function _schedulePendingSessionListApply(){
     const payload=_pendingSessionListPayload;
     _pendingSessionListPayload=null;
     if(payload.gen!==_renderSessionListGen) return;
+    if(payload.transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(payload.transitionOwner)) return;
     // Profile switch may have bumped unread gen after the list gen check
     // window; still drop completion-marking for the stale pre-switch payload.
     _applySessionListPayload(payload.sessData,payload.projData,{
       unreadGen:payload.unreadGen,
+      transitionOwner:payload.transitionOwner,
     });
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
@@ -5390,6 +5433,8 @@ function _applySessionListPayload(sessData, projData, opts){
   // active profile so the "Show N from other profiles" toggle can render
   // without a second round-trip. Stashed on the module for renderSessionListFromCache.
   const applyOpts = (opts && typeof opts === 'object') ? opts : {};
+  const transitionOwner=applyOpts.transitionOwner||null;
+  if(transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner)) return;
   _otherProfileCount = sessData.other_profile_count || 0;
   _archivedWebuiCount = Number(sessData.archived_webui_count ?? sessData.archived_count ?? 0);
   _archivedCliCount = Number(sessData.archived_cli_count ?? 0);
@@ -5600,6 +5645,9 @@ function _renderSessionListLoadErrorNote(){
 
 async function _runRenderSessionListRefresh(opts, _gen){
   const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
+  const transitionOwner=opts&&opts.transitionOwner||null;
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+  if(!transitionCurrent()) return;
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   // Capture profile-switch unread generation BEFORE the await so a switch
   // mid-flight (which increments _cronPollGeneration) invalidates completion
@@ -5624,6 +5672,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
       sessionRequestOpts.retryTimeouts=true;
     }
     const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
+    if(!transitionCurrent()) return;
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     // #4671: while a profile switch is mid-flight, drop ANY payload — even one whose
@@ -5633,12 +5682,13 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // renderSessionList(), so that render's payload is the first allowed to paint.
     if (_profileSwitchListEmbargo) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
-      _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
+      _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen,transitionOwner};
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData,{unreadGen});
+    _applySessionListPayload(sessData,projData,{unreadGen,transitionOwner});
   }catch(e){
+    if(!transitionCurrent()) return;
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that
     // FAILS must not clear the skeleton flag or render the old-profile cache either. The
@@ -5971,6 +6021,8 @@ function ensureActiveSessionExternalRefreshPoll(){
 async function refreshSessionList(reason='manual', opts={}){
   const force = !!(opts && opts.force);
   const refreshActive = !!(opts && opts.refreshActive);
+  const transitionOwner=opts&&opts.transitionOwner||null;
+  if(transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner)) return;
   if(!force && typeof document !== 'undefined' && document.hidden) return;
   if(_sessionListRefreshInFlight){
     _sessionListRefreshPendingRequest = {
@@ -5981,7 +6033,8 @@ async function refreshSessionList(reason='manual', opts={}){
   }
   _sessionListRefreshInFlight = true;
   try{
-    await renderSessionList({deferWhileInteracting:!force});
+    await renderSessionList({deferWhileInteracting:!force,transitionOwner});
+    if(transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner)) return;
     if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list');
   }finally{
     _sessionListRefreshInFlight = false;

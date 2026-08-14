@@ -63,13 +63,27 @@ function evalBoot(name) {{
 
 def test_profile_switch_entrypoints_await_destination_commentary_preference():
     """Both profile switch ingresses share and revalidate one accepted owner."""
-    assert "_acceptProfileTransitionOwner(data.active || name, 'canonical')" in PANELS_JS
-    assert "_acceptProfileTransitionOwner(data.active||name,'session-load')" in SESSIONS_JS
+    assert "_beginProfileTransitionOwner(name, 'canonical')" in PANELS_JS
+    assert "_acceptProfileTransitionOwner(_transitionOwner, data.active || name)" in PANELS_JS
+    assert "_beginProfileTransitionOwner(name,'session-load')" in SESSIONS_JS
+    assert "_acceptProfileTransitionOwner(transitionOwner,data.active||name)" in SESSIONS_JS
     assert "_isProfileTransitionOwner(_transitionOwner)" in PANELS_JS
     assert "_isProfileTransitionOwner(transitionOwner)" in SESSIONS_JS
     assert "await refreshReasoningPreferencesForRender(" in SESSIONS_JS
     assert "S.session.model_provider" in SESSIONS_JS
     assert "await fetchReasoningChip();" in BOOT_JS
+
+
+def test_shared_transition_epoch_covers_invocation_rejection_and_cleanup():
+    canonical = PANELS_JS[PANELS_JS.index("async function switchToProfile(name)"):]
+    recovery = SESSIONS_JS[SESSIONS_JS.index("async function _switchProfileForSessionLoad(profile)"):]
+    assert canonical.index("_beginProfileTransitionOwner(name, 'canonical')") < canonical.index("await _postProfileTransition(_transitionOwner)")
+    assert recovery.index("_beginProfileTransitionOwner(name,'session-load')") < recovery.index("await _postProfileTransition(transitionOwner)")
+    assert "const _ownsFailure = _switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner);" in canonical
+    assert "if (_ownsFailure)" in canonical
+    assert "_cancelProfileTransitionOwner(_transitionOwner);" in canonical
+    assert "if(!_isProfileTransitionOwner(transitionOwner)) return null;" in recovery
+    assert "_cancelProfileTransitionOwner(transitionOwner);" in recovery
 
 
 def test_render_preference_refresh_waits_for_effective_commentary_flag():

@@ -288,7 +288,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         block = PANELS_JS[idx:idx + 1600]
 
         pos_sync = block.find('syncTopbar()')
-        pos_render = block.find('await renderSessionList()')
+        pos_render = block.find('await renderSessionList({transitionOwner:_transitionOwner})')
         self.assertGreater(pos_sync, -1, "syncTopbar() must exist in block")
         self.assertGreater(pos_render, -1, "renderSessionList() must exist in block")
         self.assertLess(pos_sync, pos_render,
