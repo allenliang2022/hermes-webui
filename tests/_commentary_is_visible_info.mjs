@@ -18,6 +18,7 @@ function functionSource(name){
   throw new Error(`unterminated ${name}`);
 }
 
+const persistedCommentarySource=functionSource('_assistantPersistedCommentaryPayloadText');
 const commentarySource=functionSource('_assistantCommentaryPayloadText');
 const displaySource=functionSource('_assistantDisplayContentFromMessage');
 const reasoningSource=functionSource('_assistantReasoningPayloadText');
@@ -29,7 +30,7 @@ const belongsSource=functionSource('_assistantMessageBelongsInWorklog');
 const settledRowsSource=functionSource('_anchorSceneRowsForSettledWorklog');
 const deferredRowsSource=functionSource('_deferredWorklogRowsFromGroup');
 const revealSource=functionSource('_revealTransparentEarlierSteps');
-const runtime=new Function(`function _stripXmlToolCallsDisplay(text){return String(text||'');}\nfunction _isAssistantEmptyPlaceholderContent(){return false;}\n${commentarySource}\n${displaySource}\n${reasoningSource}\n${sanitizeSource}\n${normalizeSource}\n${stripEchoSource}\n${worklogSource}\n${belongsSource}\nreturn {_assistantCommentaryPayloadText,_assistantDisplayContentFromMessage,_worklogReasoningTextFromMessage,_assistantMessageBelongsInWorklog};`)();
+const runtime=new Function(`const window={_showCommentary:true};\nfunction _stripXmlToolCallsDisplay(text){return String(text||'');}\nfunction _isAssistantEmptyPlaceholderContent(){return false;}\n${persistedCommentarySource}\n${commentarySource}\n${displaySource}\n${reasoningSource}\n${sanitizeSource}\n${normalizeSource}\n${stripEchoSource}\n${worklogSource}\n${belongsSource}\nreturn {window,_assistantPersistedCommentaryPayloadText,_assistantCommentaryPayloadText,_assistantDisplayContentFromMessage,_worklogReasoningTextFromMessage,_assistantMessageBelongsInWorklog};`)();
 
 const progress='Candidate identity verified; running the real restart now.';
 const commentaryMessage={
@@ -53,8 +54,14 @@ assert.equal(runtime._assistantMessageBelongsInWorklog({...commentaryMessage,_li
   'visible live commentary must remain ordinary information');
 assert.equal(runtime._assistantMessageBelongsInWorklog({role:'assistant',content:'',tool_calls:[{id:'call-1'}]},0,new Set([0]),'',{}),true,
   'an empty tool activity message still belongs in Worklog');
+runtime.window._showCommentary=false;
+assert.equal(runtime._assistantCommentaryPayloadText(commentaryMessage),'',
+  'profile-off commentary must not become ordinary assistant content');
+assert.equal(runtime._assistantPersistedCommentaryPayloadText(commentaryMessage),progress,
+  'presentation gating must not mutate or discard the persisted sidecar');
+runtime.window._showCommentary=true;
 
-const settledRowsRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${settledRowsSource}\nreturn _anchorSceneRowsForSettledWorklog;`)();
+const settledRowsRuntime=new Function('messages',`const window={_showCommentary:true,_showThinking:true};\nconst S={messages};\nfunction _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${persistedCommentarySource}\n${reasoningSource}\n${settledRowsSource}\nreturn {window,run:_anchorSceneRowsForSettledWorklog};`)([commentaryMessage]);
 const sceneRows=[
   {role:'prose',kind:'process_prose',text:progress},
   {role:'prose',kind:'process_prose',text:'Distinct process prose'},
@@ -67,12 +74,13 @@ const visibleBlocks={
   insertBefore(fragment){this.inserted=fragment.children.slice();},
   appendChild(fragment){this.inserted=fragment.children.slice();},
 };
-assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
+assert.deepEqual(settledRowsRuntime.run({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
   'settled Worklog must drop only prose already rendered as ordinary commentary');
-assert.deepEqual(settledRowsRuntime({activity_rows:sceneRows},{querySelectorAll:()=>[]}),sceneRows,
+assert.deepEqual(settledRowsRuntime.run({activity_rows:sceneRows},{querySelectorAll:()=>[]}),sceneRows,
   'legacy scenes without a visible commentary owner keep their prose fallback');
 
 const deferredRowsRuntime=new Function('sceneRows','visibleBlocks',`
+  const window={_showCommentary:true,_showThinking:true};
   const S={messages:[{_anchor_activity_scene:{activity_rows:sceneRows}}]};
   function _assistantTurnBlocks(){return visibleBlocks;}
   function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}
@@ -93,7 +101,8 @@ function runReveal(revealImplementation){
     const seen=[];
     const _transparentRevealedTurns=new Set();
     const _sessionHtmlCache=new Map();
-    const S={session:{session_id:'sid'}};
+    const window={_showCommentary:true,_showThinking:true};
+    const S={session:{session_id:'sid'},messages:[]};
     const messages={scrollTop:0,scrollHeight:100};
     function $(id){return id==='messages'?messages:null;}
     function _transparentRevealKey(){return 'sid:0';}
@@ -136,15 +145,15 @@ const call='_assistantDisplayContentFromMessage(m, content)';
 assert.equal(renderSource.split(call).length-1,1,'renderMessages must consume commentary display classification exactly once');
 
 const phaseTarget="String(item.phase||'').toLowerCase()!=='commentary'";
-assert.equal(commentarySource.split(phaseTarget).length-1,1,'commentary mutation target must be unique');
-const phaseMutant=commentarySource.replace(phaseTarget,'true');
-const phaseRuntime=new Function(`${phaseMutant}\nreturn _assistantCommentaryPayloadText;`)();
+assert.equal(persistedCommentarySource.split(phaseTarget).length-1,1,'commentary mutation target must be unique');
+const phaseMutant=persistedCommentarySource.replace(phaseTarget,'true');
+const phaseRuntime=new Function(`${phaseMutant}\nreturn _assistantPersistedCommentaryPayloadText;`)();
 assert.notEqual(phaseRuntime(commentaryMessage),progress,'removing commentary classification must RED');
 
 const displayTarget="if(existing) return existing;";
 assert.equal(displaySource.split(displayTarget).length-1,1,'display mutation target must be unique');
 const displayMutant=displaySource.replace(displayTarget,'return existing;');
-const displayRuntime=new Function(`${commentarySource}\n${displayMutant}\nreturn _assistantDisplayContentFromMessage;`)();
+const displayRuntime=new Function(`const window={_showCommentary:true};\n${persistedCommentarySource}\n${commentarySource}\n${displayMutant}\nreturn _assistantDisplayContentFromMessage;`)();
 assert.notEqual(displayRuntime(commentaryMessage,''),progress,'disabling empty-content fallback must RED');
 
 const belongsTarget='if(hasVisibleText) return false;';
@@ -157,7 +166,7 @@ assert.notEqual(belongsRuntime({...commentaryMessage,_activityBurstId:9},0,new S
 const settledRowsTarget="if(!visibleCommentaryTexts.size) return rows;";
 assert.equal(settledRowsSource.split(settledRowsTarget).length-1,1,'settled Worklog ownership target must be unique');
 const settledRowsMutant=settledRowsSource.replace(settledRowsTarget,'return rows;');
-const settledRowsMutantRuntime=new Function(`function _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${settledRowsMutant}\nreturn _anchorSceneRowsForSettledWorklog;`)();
+const settledRowsMutantRuntime=new Function(`const window={_showCommentary:true,_showThinking:true};\nconst S={messages:[]};\nfunction _anchorSceneRowsForRendering(scene){return scene.activity_rows||[];}\nfunction _normalizeThinkingEchoCompare(text){return String(text||'').replace(/\\s+/g,' ').trim();}\n${persistedCommentarySource}\n${reasoningSource}\n${settledRowsMutant}\nreturn _anchorSceneRowsForSettledWorklog;`)();
 assert.notDeepEqual(settledRowsMutantRuntime({activity_rows:sceneRows},visibleBlocks),sceneRows.slice(1),
   'duplicating visible commentary inside Worklog must RED');
 

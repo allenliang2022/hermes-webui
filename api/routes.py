@@ -12591,9 +12591,9 @@ def handle_get(handler, parsed) -> bool:
         return handle_transcribe_capability(handler)
 
     if parsed.path == "/api/reasoning":
-        # Current reasoning config (shared source of truth with the CLI —
-        # reads display.show_reasoning and agent.reasoning_effort from
-        # the active profile's config.yaml).
+        # Current reasoning/display config (shared source of truth with the CLI —
+        # reads display.show_reasoning, display.show_commentary, and
+        # agent.reasoning_effort from the active profile's config.yaml).
         query = parse_qs(parsed.query)
         model_id = (query.get("model", [""])[0] or "").strip() or None
         provider_id = (query.get("provider", [""])[0] or "").strip() or None

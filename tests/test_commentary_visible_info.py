@@ -239,6 +239,88 @@ def test_render_messages_projects_commentary_once_and_restores_deferred_worklog(
         assert any(distinct_reasoning in text for text in restored["rowTexts"])
         assert any("terminal" in text.lower() for text in restored["rowTexts"])
 
+        commentary_off = page.evaluate(
+            """({messages, progress}) => {
+              window._showCommentary = false;
+              window._showThinking = true;
+              // Same-session warm restoration: the cache was populated while
+              // commentary was ON. The preference is part of the render
+              // signature, so this must rebuild rather than replay stale HTML.
+              S.session = {session_id: 'commentary-render'};
+              S.messages = messages;
+              _sessionHtmlCacheSid = null;
+              renderMessages();
+              const group = document.querySelector('[data-anchor-settled-scene-owner="1"]');
+              _materializeDeferredWorklogRows(group);
+              const transcript = document.querySelector('#msgInner')?.innerText || '';
+              return {
+                visibleCount: document.querySelectorAll('[data-visible-commentary="1"]').length,
+                progressVisible: transcript.includes(progress),
+                progressThinkingCount: Array.from(document.querySelectorAll('[data-anchor-row-role="thinking"],.thinking-card-row,.thinking-block,.agent-activity-thinking'))
+                  .filter(node => node.innerText.includes(progress)).length,
+                progressProseCount: Array.from(document.querySelectorAll('[data-anchor-row-role="prose"]'))
+                  .filter(node => node.innerText.includes(progress)).length,
+                sidecarPhase: S.messages[1].codex_message_items[0].phase,
+                sidecarText: S.messages[1].codex_message_items[0].content[0].text,
+              };
+            }""",
+            {"messages": messages, "progress": progress},
+        )
+        assert commentary_off == {
+            "visibleCount": 0,
+            "progressVisible": False,
+            "progressThinkingCount": 1,
+            "progressProseCount": 0,
+            "sidecarPhase": "commentary",
+            "sidecarText": progress,
+        }
+
+        all_private = page.evaluate(
+            """({messages, progress}) => {
+              window._showCommentary = false;
+              window._showThinking = false;
+              S.session = {session_id: 'commentary-render'};
+              S.messages = messages;
+              _sessionHtmlCacheSid = null;
+              renderMessages();
+              const group = document.querySelector('[data-anchor-settled-scene-owner="1"]');
+              _materializeDeferredWorklogRows(group);
+              const transcript = document.querySelector('#msgInner')?.innerText || '';
+              return {
+                visibleCount: document.querySelectorAll('[data-visible-commentary="1"]').length,
+                progressVisible: transcript.includes(progress),
+                progressOwnedRows: Array.from(document.querySelectorAll('[data-anchor-scene-row="1"]'))
+                  .filter(node => node.innerText.includes(progress)).length,
+                sidecarPhase: S.messages[1].codex_message_items[0].phase,
+              };
+            }""",
+            {"messages": messages, "progress": progress},
+        )
+        assert all_private == {
+            "visibleCount": 0,
+            "progressVisible": False,
+            "progressOwnedRows": 0,
+            "sidecarPhase": "commentary",
+        }
+
+        commentary_on_again = page.evaluate(
+            """({messages, progress}) => {
+              window._showCommentary = true;
+              window._showThinking = true;
+              S.session = {session_id: 'commentary-render'};
+              S.messages = messages;
+              _sessionHtmlCacheSid = null;
+              renderMessages();
+              const visible = document.querySelector('[data-visible-commentary="1"]');
+              return {
+                visibleCount: document.querySelectorAll('[data-visible-commentary="1"]').length,
+                visibleText: visible?.querySelector('.msg-body')?.innerText.trim() || '',
+              };
+            }""",
+            {"messages": messages, "progress": progress},
+        )
+        assert commentary_on_again == {"visibleCount": 1, "visibleText": progress}
+
         final = page.evaluate(
             """({finalAnswer}) => {
               S.session = {session_id: 'commentary-final-answer'};

@@ -5102,10 +5102,11 @@ function fetchReasoningChip(keyOverride){
   const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
-  api('/api/reasoning'+key).then(function(st){
+  return api('/api/reasoning'+key).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
     // apply, so an older in-flight GET can't poison the current chip (#4650).
     if(seq!==_reasoningFetchSeq) return;
+    window._showCommentary=!st||st.show_commentary!==false;
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
@@ -5117,18 +5118,26 @@ function fetchReasoningChip(keyOverride){
   });
 }
 
+function refreshReasoningPreferencesForRender(model, provider){
+  // Invalidate both the request cache and any older in-flight response, then
+  // fail closed until the active profile's effective display preference is
+  // known. Callers await this before rendering persisted/cached transcript.
+  _lastReasoningFetchKey=null;
+  ++_reasoningFetchSeq;
+  window._showCommentary=false;
+  const params=new URLSearchParams();
+  if(model) params.set('model',model);
+  if(provider) params.set('provider',provider);
+  return fetchReasoningChip(params.size?'?'+params.toString():undefined);
+}
+
 function refreshProfileTransitionReasoningChip(model, provider){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
   _currentReasoningToggleSupported=undefined;
-  _lastReasoningFetchKey=null;
-  ++_reasoningFetchSeq;
   _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
-  const params=new URLSearchParams();
-  if(model) params.set('model',model);
-  if(provider) params.set('provider',provider);
-  fetchReasoningChip(params.size?'?'+params.toString():undefined);
+  return refreshReasoningPreferencesForRender(model,provider);
 }
 
 function clearProfileTransitionReasoningContext(){
@@ -10727,7 +10736,7 @@ function _assistantAnchorSceneFinalAnswerText(m){
   const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
   return String(text||'').trim()?text:'';
 }
-function _assistantCommentaryPayloadText(m){
+function _assistantPersistedCommentaryPayloadText(m){
   if(!m||m.role!=='assistant') return '';
   let items=m.codex_message_items;
   if(typeof items==='string'){
@@ -10750,6 +10759,10 @@ function _assistantCommentaryPayloadText(m){
     }
   }
   return parts.join('').trim();
+}
+function _assistantCommentaryPayloadText(m){
+  if(window._showCommentary===false) return '';
+  return _assistantPersistedCommentaryPayloadText(m);
 }
 function _assistantDisplayContentFromMessage(m, rawContent){
   const existing=String(rawContent||'').trim();
@@ -13432,6 +13445,7 @@ function _anchorSceneHasErroredTerminalState(scene){
 function _anchorSceneRowsForSettledWorklog(scene, blocks){
   const rows=_anchorSceneRowsForRendering(scene,{settled:true});
   const visibleCommentaryTexts=new Set();
+  const commentaryReasoningFallbackTexts=new Set();
   if(blocks&&blocks.querySelectorAll){
     blocks.querySelectorAll('[data-visible-commentary="1"]').forEach(node=>{
       const key=_normalizeThinkingEchoCompare(
@@ -13439,15 +13453,43 @@ function _anchorSceneRowsForSettledWorklog(scene, blocks){
       );
       if(key) visibleCommentaryTexts.add(key);
     });
+    // The presentation preference may suppress the ordinary commentary owner,
+    // but its exact settled-scene echo must not leak through Worklog. Resolve
+    // source text from the immutable session sidecar via raw message indices;
+    // do not mutate/remove codex_message_items and do not copy private text into
+    // a DOM attribute just to make the ownership decision.
+    blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
+      const idx=Number(node.getAttribute('data-msg-idx'));
+      if(!Number.isFinite(idx)||!S||!Array.isArray(S.messages)) return;
+      const key=_normalizeThinkingEchoCompare(
+        _assistantPersistedCommentaryPayloadText(S.messages[idx])
+      );
+      if(key){
+        visibleCommentaryTexts.add(key);
+        const reasoningKey=_normalizeThinkingEchoCompare(
+          _assistantReasoningPayloadText(S.messages[idx])
+        );
+        if(reasoningKey===key) commentaryReasoningFallbackTexts.add(key);
+      }
+    });
   }
   if(!visibleCommentaryTexts.size) return rows;
   // Commentary is ordinary assistant information. Keep tools, true reasoning
-  // and DISTINCT process prose in Worklog; remove only an exact commentary echo.
-  return rows.filter(row=>{
-    if(!row||String(row.role||'')!=='prose') return true;
-    return !visibleCommentaryTexts.has(
-      _normalizeThinkingEchoCompare(row.text||row.content||'')
-    );
+  // and DISTINCT process prose in Worklog. When commentary presentation is off,
+  // an exact reasoning-backed echo becomes Thinking (and therefore obeys the
+  // independent show_thinking preference) instead of leaking as process prose.
+  return rows.flatMap(row=>{
+    if(!row||String(row.role||'')!=='prose') return [row];
+    const key=_normalizeThinkingEchoCompare(row.text||row.content||'');
+    if(!visibleCommentaryTexts.has(key)) return [row];
+    if(
+      window._showCommentary===false&&
+      window._showThinking!==false&&
+      commentaryReasoningFallbackTexts.has(key)
+    ){
+      return [{...row,role:'thinking',kind:'reasoning',display_hint:'collapsed_thinking'}];
+    }
+    return [];
   });
 }
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
@@ -14746,6 +14788,8 @@ function _messageRenderCacheSignature(){
     hash=Math.imul(hash,16777619)>>>0;
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
+  add(window._showCommentary!==false);
+  add(window._showThinking!==false);
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }

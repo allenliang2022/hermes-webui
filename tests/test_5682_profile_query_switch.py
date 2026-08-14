@@ -61,6 +61,63 @@ function evalBoot(name) {{
 """
 
 
+def test_profile_switch_entrypoints_await_destination_commentary_preference():
+    """No switch path may render destination sessions under the old profile flag."""
+    assert (
+        "await refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);"
+        in PANELS_JS
+    )
+    assert (
+        "await refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);"
+        in SESSIONS_JS
+    )
+    assert (
+        "await refreshReasoningPreferencesForRender(S.session.model,S.session.model_provider);"
+        in SESSIONS_JS
+    )
+    assert "await fetchReasoningChip();" in BOOT_JS
+
+
+def test_render_preference_refresh_waits_for_effective_commentary_flag():
+    source = f"""
+const uiSrc = {UI_JS!r};
+function extractFunc(name) {{
+  const start = uiSrc.indexOf('function ' + name);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = uiSrc.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < uiSrc.length) {{
+    if (uiSrc[i] === '{{') depth++;
+    else if (uiSrc[i] === '}}') depth--;
+    i++;
+  }}
+  return uiSrc.slice(start, i);
+}}
+global.window = {{_showCommentary:true}};
+let resolveRequest;
+global.api = () => new Promise(resolve => {{ resolveRequest = resolve; }});
+global._applyReasoningChip = () => {{}};
+var _lastReasoningFetchKey = '?old';
+var _reasoningFetchSeq = 4;
+eval(extractFunc('fetchReasoningChip'));
+eval(extractFunc('refreshReasoningPreferencesForRender'));
+(async () => {{
+  let settled = false;
+  const pending = refreshReasoningPreferencesForRender('gpt-5', 'openai').then(() => {{ settled = true; }});
+  await Promise.resolve();
+  const before = {{settled, showCommentary:window._showCommentary}};
+  resolveRequest({{show_commentary:false, reasoning_effort:'', supported_efforts:[]}});
+  await pending;
+  const after = {{settled, showCommentary:window._showCommentary}};
+  console.log(JSON.stringify({{before, after}}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    payload = json.loads(_run_node(source))
+    assert payload == {
+        "before": {"settled": False, "showCommentary": False},
+        "after": {"settled": True, "showCommentary": False},
+    }
+
+
 def test_valid_profile_query_switches_before_restore_and_cleans_url():
     source = _node_prelude() + """
 function applyUrl(rel) {
@@ -152,7 +209,7 @@ global.switchToProfile = async (name) => {
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
   const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", profilePos);
-  const initialReasoningFetchPos = bootSrc.indexOf("if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();", profilePos);
+  const initialReasoningFetchPos = bootSrc.indexOf("await fetchReasoningChip();", profilePos);
   console.log(JSON.stringify({ intent, switched, promoted, afterProfile, afterPrefill, historyCalls: window.history.calls, profilePos, renderPos, savedPos, loadPos, consumePos, completedPos, changedPos, cleanupGuardPos, initialReasoningFetchPos, savedLocalBefore, savedLocalAfterSuppress, savedLocalAfterReload, blocksSavedLocal, keepsExplicitSession }));
 })().catch(err => {
   console.error(err);
@@ -609,6 +666,7 @@ const els = {{
   composerReasoningChip: makeEl(), composerMobileReasoningAction: makeEl(),
 }};
 global.$ = id => els[id] || null;
+global.window = {{}};
 global.S = {{ session: {{ model: 'gpt-5', model_provider: 'openai' }} }};
 global._highlightReasoningOption = () => {{}};
 global._applyReasoningOptions = () => {{}};
@@ -627,6 +685,7 @@ eval(extractFunc('_normalizeReasoningEffort'));
 eval(extractFunc('_formatReasoningEffortLabel'));
 eval(extractFunc('_applyReasoningChip'));
 eval(extractFunc('fetchReasoningChip'));
+eval(extractFunc('refreshReasoningPreferencesForRender'));
 eval(extractFunc('refreshProfileTransitionReasoningChip'));
 fetchReasoningChip();
 refreshProfileTransitionReasoningChip();
@@ -634,6 +693,7 @@ const beforeDestination = {{
   effort: _currentReasoningEffort,
   cachedKey: _lastReasoningFetchKey,
   wrapDisplay: els.composerReasoningWrap.style.display,
+  showCommentary: window._showCommentary,
   calls,
 }};
 pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
@@ -646,6 +706,7 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
         "effort": "",
         "cachedKey": "?model=gpt-5",
         "wrapDisplay": "none",
+        "showCommentary": False,
         "calls": 2,
     }
     assert payload["afterPreviousResponse"] == {"effort": "", "wrapDisplay": "none"}
@@ -713,6 +774,7 @@ eval(extractFunc(uiSrc, '_reasoningEffortContext'));
 eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
 eval(extractFunc(uiSrc, '_applyReasoningChip'));
 eval(extractFunc(uiSrc, 'fetchReasoningChip'));
+eval(extractFunc(uiSrc, 'refreshReasoningPreferencesForRender'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'syncTopbar'));
 eval(extractFunc(panelsSrc, 'switchToProfile'));
@@ -807,6 +869,7 @@ eval(extractFunc(uiSrc, '_reasoningEffortContext'));
 eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
 eval(extractFunc(uiSrc, '_applyReasoningChip'));
 eval(extractFunc(uiSrc, 'fetchReasoningChip'));
+eval(extractFunc(uiSrc, 'refreshReasoningPreferencesForRender'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'clearProfileTransitionReasoningContext'));
 eval(extractFunc(uiSrc, 'syncReasoningChip'));

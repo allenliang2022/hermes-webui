@@ -1645,7 +1645,7 @@ async function _switchProfileForSessionLoad(profile){
     if(data.default_model) window._defaultModel=data.default_model;
     if(data.default_model_provider) window._activeProvider=data.default_model_provider;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
-      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
+      await refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();
@@ -1955,6 +1955,15 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof refreshReasoningPreferencesForRender==='function'){
+    await refreshReasoningPreferencesForRender(S.session.model,S.session.model_provider);
+    // A newer navigation can win while the preference request is in flight.
+    // Do not render/cache this stale session under the newer profile/session.
+    if(!_isCurrentLoad()){
+      _rearmActiveSessionStream();
+      return;
+    }
+  }
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
