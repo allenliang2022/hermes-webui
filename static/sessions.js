@@ -1955,6 +1955,9 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  // Loading a real existing session abandons any pre-session toolset override
+  // before the awaited display-preference refresh can yield to another action.
+  S._pendingSessionToolsets=null;
   if(typeof refreshReasoningPreferencesForRender==='function'){
     await refreshReasoningPreferencesForRender(S.session.model,S.session.model_provider);
     // A newer navigation can win while the preference request is in flight.
@@ -1965,9 +1968,6 @@ async function loadSession(sid){
     }
   }
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
-  // Loading a real existing session abandons any pre-session toolset override
-  // staged on the empty composer before any deferred refresh work runs.
-  S._pendingSessionToolsets=null;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
