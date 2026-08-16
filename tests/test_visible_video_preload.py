@@ -111,11 +111,13 @@ global.document={
 };
 global.window={};
 global._applyMediaPlaybackRate=()=>{};
-const video={nodeType:1,dataset:{},matches:s=>s==='.msg-media-video'||s==='audio,video',querySelectorAll:()=>[]};
+const video={nodeType:1,isConnected:true,dataset:{},preload:'metadata',loads:0,load(){this.loads+=1;},matches:s=>s==='.msg-media-video'||s==='audio,video',querySelectorAll:()=>[]};
 _initMediaPlaybackObserver();
 mutationCallback([{addedNodes:[video],removedNodes:[]}]);
 mutationCallback([{addedNodes:[],removedNodes:[video]}]);
-console.log(JSON.stringify({observed:observed.length,unobserved:unobserved.length}));
+video.isConnected=false;
+ioCallback([{target:video,isIntersecting:true}]);
+console.log(JSON.stringify({observed:observed.length,unobserved:unobserved.length,preload:video.preload,loads:video.loads,marker:video.dataset.visiblePreload||null}));
 """,
         ]
     )
@@ -123,4 +125,10 @@ console.log(JSON.stringify({observed:observed.length,unobserved:unobserved.lengt
         ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"observed": 1, "unobserved": 1}
+    assert json.loads(result.stdout) == {
+        "observed": 1,
+        "unobserved": 2,
+        "preload": "metadata",
+        "loads": 0,
+        "marker": None,
+    }

@@ -2587,6 +2587,7 @@ function _applyMediaPlaybackRate(media, rate=_getStoredMediaPlaybackRate()){
 let _mediaVisibilityObserver=null;
 function _promoteVisibleVideoPreload(video){
   if(!video||!video.matches||!video.matches('.msg-media-video')) return;
+  if(video.isConnected===false) return;
   if(video.dataset&&video.dataset.visiblePreload==='1') return;
   if(video.dataset) video.dataset.visiblePreload='1';
   video.preload='auto';
