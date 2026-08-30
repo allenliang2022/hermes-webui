@@ -2,7 +2,7 @@
 (function(){
 'use strict';
 
-const SCHEMA=1;
+const SCHEMA=2;
 const CACHE_FAMILY='hermes-snapshot-video-v';
 const CACHE_PREFIX='hermes-snapshot-video-v'+SCHEMA+'-';
 const META_PATH='/__hermes_snapshot_video_cache_meta__';
@@ -30,6 +30,9 @@ const consumers=new Map();
 
 class MediaCacheLimitError extends Error{
   constructor(message){super(message);this.name='MediaCacheLimitError';}
+}
+class MediaCacheIntegrityError extends Error{
+  constructor(message){super(message);this.name='MediaCacheIntegrityError';}
 }
 
 function _cacheStorage(){
@@ -70,8 +73,22 @@ function _sessionContext(value){
 function _scopeRequestContext(value){
   try{
     const url=new URL(value,document.baseURI||location.href);
-    return String(url.searchParams.get('session_id')||'')+'\n'+String(url.searchParams.get('path')||'');
+    return String(url.searchParams.get('session_id')||'')+'\n'+
+      String(url.searchParams.get('path')||'')+'\n'+
+      String(url.searchParams.get('snap')||'').toLowerCase();
   }catch(_){return '';}
+}
+function _cacheKey(resource){
+  const value=String(resource||'').toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(value)) return '';
+  return new URL('/__hermes_snapshot_video_cache_resource__/'+value,location.origin).href;
+}
+async function _blobDigest(blob){
+  if(!globalThis.crypto||!crypto.subtle||typeof blob.arrayBuffer!=='function'){
+    throw new Error('snapshot digest verification unavailable');
+  }
+  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()));
+  return Array.from(bytes,value=>value.toString(16).padStart(2,'0')).join('');
 }
 function _progress(record,received,total){
   if(!record||!record.video) return;
@@ -249,16 +266,22 @@ async function _requestScope(sourceUrl){
   endpoint.searchParams.set('session_id',sessionContext);
   const mediaUrl=new URL(sourceUrl,document.baseURI||location.href);
   endpoint.searchParams.set('path',String(mediaUrl.searchParams.get('path')||''));
+  endpoint.searchParams.set('snap',String(mediaUrl.searchParams.get('snap')||'').toLowerCase());
   const response=await fetch(endpoint.href,{
     credentials:'include',cache:'no-store',headers:{'Accept':'application/json'},
   });
   if(!response.ok){
-    await clearAll();
+    // Invalidate old partitions without releasing the videos waiting on this
+    // authorization decision; they still need to enter the native fallback.
+    await clearAll(true,scopeWaiters);
     throw new Error('media cache scope unavailable');
   }
   const payload=await response.json();
   const value=String(payload&&payload.scope||'');
-  if(payload.schema!==SCHEMA||!/^[0-9a-z-]{6,128}$/i.test(value)) throw new Error('invalid media cache scope');
+  const resource=String(payload&&payload.resource||'').toLowerCase();
+  if(payload.schema!==SCHEMA||!/^[0-9a-z-]{6,128}$/i.test(value)||!/^[0-9a-f]{64}$/.test(resource)){
+    throw new Error('invalid media cache authorization');
+  }
   if(generation!==scopeGeneration) throw new DOMException('Superseded','AbortError');
   if(scope&&scope!==value){
     _teardownActive(scopeWaiters);
@@ -267,14 +290,13 @@ async function _requestScope(sourceUrl){
   scope=value;
   scopeContext=sessionContext;
   await _deleteOldCaches(_cacheName(value));
-  return value;
+  return {scope:value,resource};
 }
 function _ensureScope(validate=false,preserveVideo=null,sourceUrl=''){
   const sessionContext=_sessionContext(sourceUrl);
   const requestContext=_scopeRequestContext(sourceUrl);
   if(!sessionContext||!requestContext) return Promise.reject(new Error('media cache session context unavailable'));
   if(preserveVideo) scopeWaiters.add(preserveVideo);
-  if(scope&&scopeContext===sessionContext&&!validate) return Promise.resolve(scope);
   if(scopePromise){
     if(scopePromiseContext===requestContext) return scopePromise;
     return scopePromise.catch(()=>{}).then(()=>_ensureScope(validate,preserveVideo,sourceUrl));
@@ -287,7 +309,7 @@ function _ensureScope(validate=false,preserveVideo=null,sourceUrl=''){
   });
   return scopePromise;
 }
-function _taskKey(currentScope,sourceUrl){return currentScope+'\n'+sourceUrl;}
+function _taskKey(currentScope,cacheKey){return currentScope+'\n'+cacheKey;}
 async function _rejectResponse(task,response,error){
   // A rejected response is still a live network stream. Cancel the body before
   // falling back so header-only validation failures cannot keep downloading in
@@ -301,7 +323,7 @@ async function _rejectResponse(task,response,error){
   throw error;
 }
 async function _download(task){
-  const cached=await _cachedBlob(task.sourceUrl,task.scope);
+  const cached=await _cachedBlob(task.cacheKey,task.scope);
   if(cached) return cached;
   const response=await fetch(task.sourceUrl,{
     credentials:'include',cache:'no-store',signal:task.controller.signal,
@@ -344,14 +366,20 @@ async function _download(task){
   }));
   const blob=await new Response(counted,{headers:{'Content-Type':contentType||'video/mp4'}}).blob();
   if(blob.size>PER_FILE_BYTES) throw new MediaCacheLimitError('video exceeds persistent cache limit');
-  await _storeBlob(task.sourceUrl,blob,task.scope);
+  if(await _blobDigest(blob)!==requestedDigest.toLowerCase()){
+    throw new MediaCacheIntegrityError('media response bytes did not match snapshot digest');
+  }
+  await _storeBlob(task.cacheKey,blob,task.scope);
   return blob;
 }
-function _getTask(currentScope,sourceUrl){
-  const key=_taskKey(currentScope,sourceUrl);
+function _getTask(authorization,sourceUrl){
+  const currentScope=authorization&&authorization.scope;
+  const cacheKey=_cacheKey(authorization&&authorization.resource);
+  if(!currentScope||!cacheKey) throw new Error('media cache resource unavailable');
+  const key=_taskKey(currentScope,cacheKey);
   let task=tasks.get(key);
   if(task) return task;
-  task={key,scope:currentScope,sourceUrl,controller:new AbortController(),consumers:new Set(),settled:false,promise:null,received:0,total:0};
+  task={key,scope:currentScope,sourceUrl,cacheKey,controller:new AbortController(),consumers:new Set(),settled:false,promise:null,received:0,total:0};
   task.promise=_download(task).finally(()=>{
     task.settled=true;
     if(tasks.get(key)===task) tasks.delete(key);
@@ -397,6 +425,18 @@ function _fallback(record){
   video.preload='metadata';
   video.src=source;
 }
+function _failIntegrity(record){
+  if(!record||consumers.get(record.video)!==record) return;
+  const video=record.video;
+  _release(video,{keepState:true});
+  video.removeAttribute('src');
+  if(video.dataset){
+    delete video.dataset.mediaSource;
+    delete video.dataset.persistentVideoFallback;
+    video.dataset.persistentVideoState='integrity-error';
+  }
+  try{video.load();}catch(_){}
+}
 async function _activate(video){
   let record=consumers.get(video);
   if(!record){_observe(video);record=consumers.get(video);}
@@ -412,9 +452,9 @@ async function _activate(video){
     // Revalidate authority before every new consumption. Otherwise an expired
     // auth cookie could keep reading an in-memory old scope without contacting
     // the server that would now deny the same media URL.
-    const currentScope=await _ensureScope(true,video,record.sourceUrl);
+    const authorization=await _ensureScope(true,video,record.sourceUrl);
     if(consumers.get(video)!==record) return;
-    const task=_getTask(currentScope,record.sourceUrl);
+    const task=_getTask(authorization,record.sourceUrl);
     record.task=task;
     task.consumers.add(record);
     if(task.received>0) _progress(record,task.received,task.total);
@@ -430,6 +470,10 @@ async function _activate(video){
   }catch(error){
     if(consumers.get(video)!==record) return;
     if(error&&error.name==='AbortError'&&record.task&&record.task.consumers.size===0) return;
+    if(error&&error.name==='MediaCacheIntegrityError'){
+      _failIntegrity(record);
+      return;
+    }
     _fallback(record);
   }
 }
@@ -479,7 +523,7 @@ function _teardownActive(preserveVideos=null){
   for(const task of tasks.values()) if(!task.settled) task.controller.abort();
   tasks.clear();
 }
-async function clearAll(broadcast=true){
+async function clearAll(broadcast=true,preserveVideos=null){
   if(broadcast&&authorityChannel){
     try{authorityChannel.postMessage({type:'authority-change'});}catch(_){}
   }
@@ -488,7 +532,7 @@ async function clearAll(broadcast=true){
   scopeContext='';
   scopePromise=null;
   scopePromiseContext='';
-  _teardownActive();
+  _teardownActive(preserveVideos);
   debugMeta={entries:{}};
   const storage=_cacheStorage();
   if(!storage) return;

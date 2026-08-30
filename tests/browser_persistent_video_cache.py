@@ -9,7 +9,7 @@ credentials are used.
 from __future__ import annotations
 
 import json
-import base64
+import hashlib
 import os
 import sys
 import tempfile
@@ -25,10 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = Path(os.getenv("VIDEO_CACHE_SCRIPT") or (ROOT / "static" / "media-cache.js"))
 UI_SCRIPT = ROOT / "static" / "ui.js"
 STYLE = ROOT / "static" / "style.css"
-DIGEST = "a" * 64
-MP4 = base64.b64decode(
-    "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAANcbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAAHgAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAod0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAB4AAAEAAABAAAAAAH/bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAACABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABqm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAWpzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4xMS4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAMg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAL7iAAAAAAAAABhzdHRzAAAAAAAAAAEAAAADAAACAAAAABRzdHNzAAAAAAAAAAEAAAABAAAAKGN0dHMAAAAAAAAAAwAAAAEAAAQAAAAAAQAABgAAAAABAAACAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAwAAAAEAAAAgc3RzegAAAAAAAAAAAAAAAwAAAsUAAAAMAAAADAAAABRzdGNvAAAAAAAAAAEAAAOMAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2Mi4zLjEwMAAAAAhmcmVlAAAC5W1kYXQAAAKuBgX//6rcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIzIDA0ODBjYjAgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0xIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTMgYl9weXJhbWlkPTIgYl9hZGFwdD0xIGJfYmlhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MjUgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD00MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAPZYiEADP//vbsvgU2FMjBAAAACEGaImxCv/7AAAAACAGeQXkK/8SB"
-)
+MP4 = (ROOT / "tests" / "fixtures" / "persistent_video_cache.mp4").read_bytes()
+DIGEST = hashlib.sha256(MP4).hexdigest()
 
 
 class State:
@@ -39,6 +37,7 @@ class State:
     native: Counter[str] = Counter()
     ranges: dict[str, list[str]] = {}
     authority = "scope-a"
+    retarget_mode = "first"
 
     @classmethod
     def reset(cls):
@@ -49,6 +48,7 @@ class State:
             cls.native.clear()
             cls.ranges.clear()
             cls.authority = "scope-a"
+            cls.retarget_mode = "first"
 
 
 class FixtureServer(ThreadingHTTPServer):
@@ -103,17 +103,48 @@ body{{margin:0;background:var(--bg,#111);color:var(--text,#eee)}} .host{{padding
         if parsed.path == "/api/media-cache/scope":
             with State.lock:
                 scope = State.authority
+                retarget_mode = State.retarget_mode
             session_id = query.get("session_id", [""])[0]
             media_path = query.get("path", [""])[0]
-            if session_id not in {"session-a", "session-b"} or not media_path.endswith(".mp4"):
+            snap_digest = query.get("snap", [""])[0].lower()
+            if (
+                session_id not in {"session-a", "session-b"}
+                or not media_path.endswith(".mp4")
+                or len(snap_digest) != 64
+            ):
                 self._send(404, b'{"error":"session not found"}', "application/json")
+                return
+            if media_path.endswith("retarget.mp4") and retarget_mode != "first":
+                self._send(404, b'{"error":"immutable binding not found"}', "application/json")
                 return
             with State.lock:
                 State.scope_requests[media_path] += 1
             if media_path.endswith("slow-scope-left.mp4"):
                 time.sleep(0.35)
-            scoped = f"{scope}-{session_id}"
-            self._send(200, json.dumps({"scope": scoped, "schema": 1}).encode(), "application/json")
+            if (
+                media_path.endswith("scope-race.mp4")
+                and snap_digest
+                == hashlib.sha256((MP4 + b"\0" * (1800 - len(MP4)))[:1800]).hexdigest()
+            ):
+                time.sleep(0.35)
+            canonical_target = "/canonical/first.mp4" if media_path.endswith("retarget.mp4") else media_path
+            resource = hashlib.sha256(
+                (canonical_target + "\0" + snap_digest).encode("utf-8")
+            ).hexdigest()
+            self._send(
+                200,
+                json.dumps({"scope": scope, "resource": resource, "schema": 2}).encode(),
+                "application/json",
+            )
+            return
+        if parsed.path == "/test/retarget":
+            value = query.get("value", [""])[0]
+            if value not in {"first", "denied", "mismatch"}:
+                self._send(400, b"bad mode", "text/plain")
+                return
+            with State.lock:
+                State.retarget_mode = value
+            self._send(200, b"ok", "text/plain")
             return
         if parsed.path == "/test/scope":
             value = query.get("value", [""])[0]
@@ -138,6 +169,9 @@ body{{margin:0;background:var(--bg,#111);color:var(--text,#eee)}} .host{{padding
 
         case = query.get("case", ["default"])[0]
         size = int(query.get("size", ["64"])[0])
+        requested_digest = query.get("snap", [""])[0].lower()
+        with State.lock:
+            retarget_mode = State.retarget_mode
         # Record application-owned full fetches separately from native media
         # requests so the production integration path proves it did not race a
         # browser-owned preload/Range request.
@@ -162,13 +196,21 @@ body{{margin:0;background:var(--bg,#111);color:var(--text,#eee)}} .host{{padding
             except (TypeError, ValueError):
                 partial = False
         payload = body[start:end + 1] if partial else body
-        status = 503 if case == "slow-reject-http" else (206 if partial else 200)
+        status = (
+            403
+            if case == "retarget" and retarget_mode == "denied"
+            else (503 if case == "slow-reject-http" else (206 if partial else 200))
+        )
         self.send_response(status)
         content_type = "text/plain" if case == "slow-reject-wrong-mime" else "video/mp4"
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "private, max-age=31536000, immutable")
-        if not case.startswith("live-fallback") and case != "slow-reject-unattested":
-            self.send_header("X-Hermes-Media-Snapshot", DIGEST)
+        if (
+            not case.startswith("live-fallback")
+            and case != "slow-reject-unattested"
+            and not (case == "retarget" and retarget_mode != "first")
+        ):
+            self.send_header("X-Hermes-Media-Snapshot", requested_digest)
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
             self.send_header("Accept-Ranges", "bytes")
@@ -198,7 +240,27 @@ body{{margin:0;background:var(--bg,#111);color:var(--text,#eee)}} .host{{padding
 
 
 def media_url(case: str, size: int = 1800, session_id: str = "session-a") -> str:
-    return f"/api/media?path=%2Ftmp%2F{case}.mp4&inline=1&session_id={session_id}&snap={DIGEST}&case={case}&size={size}"
+    body = (MP4 + (b"\0" * max(0, size - len(MP4))))[:size]
+    digest = hashlib.sha256(body).hexdigest()
+    if case == "wrong-body-right-header":
+        digest = hashlib.sha256(b"different-expected-bytes").hexdigest()
+    return f"/api/media?path=%2Ftmp%2F{case}.mp4&inline=1&session_id={session_id}&snap={digest}&case={case}&size={size}"
+
+
+def resource_fingerprint(case: str, size: int = 1800) -> str:
+    parsed = urllib.parse.urlsplit(media_url(case, size))
+    query = urllib.parse.parse_qs(parsed.query)
+    material = query["path"][0] + "\0" + query["snap"][0]
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def same_path_media_url(case: str, size: int) -> str:
+    body = (MP4 + (b"\0" * max(0, size - len(MP4))))[:size]
+    digest = hashlib.sha256(body).hexdigest()
+    return (
+        "/api/media?path=%2Ftmp%2Fscope-race.mp4&inline=1"
+        f"&session_id=session-a&snap={digest}&case={case}&size={size}"
+    )
 
 
 def video_script(url: str, *, offscreen=False, activate=False) -> str:
@@ -370,6 +432,18 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_state(page, v3, "ready")
         require(counts(page)["requests"].get("first") == 1, "reload must reuse the same authority-scoped entry")
 
+        # A chat/session switch inside the same authenticated profile/workspace
+        # must reauthorize the path but reuse the immutable path+snapshot bytes.
+        scope_requests_before_switch = counts(page)["scope_requests"].get("/tmp/first.mp4", 0)
+        session_b_url = media_url("first", 1800, session_id="session-b")
+        session_b = page.evaluate_handle(video_script(session_b_url, offscreen=True, activate=True))
+        wait_state(page, session_b, "ready")
+        require(counts(page)["requests"].get("first") == 1, "session B must reuse session A's authorized immutable snapshot")
+        session_a_again = page.evaluate_handle(video_script(url, offscreen=True, activate=True))
+        wait_state(page, session_a_again, "ready")
+        require(counts(page)["requests"].get("first") == 1, "A to B to A must not evict the same authority cache")
+        require(counts(page)["scope_requests"].get("/tmp/first.mp4", 0) == scope_requests_before_switch + 2, "both B and the return to A must independently reauthorize the exact path")
+
         # A server-side authority rotation is detected even without an explicit
         # profile/logout hook; old cached bytes are not reused after the server
         # would deny their former session.
@@ -378,7 +452,92 @@ def run(base: str, artifact_dir: Path) -> None:
         page.evaluate("v => v.dispatchEvent(new Event('play'))", rotated)
         wait_state(page, rotated, "ready")
         require(counts(page)["requests"].get("first") == 2, "authority rotation must force a new authorized media fetch")
-        require(page.evaluate("HermesPersistentVideoCache.debugSnapshot().scope") == "scope-rotated-session-a", "authority scope must refresh before cache read")
+        require(page.evaluate("HermesPersistentVideoCache.debugSnapshot().scope") == "scope-rotated", "authority scope must refresh before cache read")
+
+        print("PHASE canonical-retarget", flush=True)
+        page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
+        page.evaluate("() => fetch('/test/retarget?value=first').then(r=>r.text())")
+        retarget_url = media_url("retarget", 1800)
+        retarget_first = page.evaluate_handle(
+            video_script(retarget_url, offscreen=True, activate=True)
+        )
+        wait_state(page, retarget_first, "ready")
+        require(
+            counts(page)["requests"].get("retarget") == 1,
+            "initial canonical target A must populate one persistent entry",
+        )
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", retarget_first)
+
+        page.evaluate("() => fetch('/test/retarget?value=denied').then(r=>r.text())")
+        retarget_denied = page.evaluate_handle(
+            video_script(retarget_url, offscreen=True, activate=True)
+        )
+        wait_state(page, retarget_denied, "fallback")
+        require(
+            not page.evaluate("v => v.src.startsWith('blob:')", retarget_denied),
+            "retargeting the raw path to denied B must not attach cached A",
+        )
+        require(
+            page.evaluate("HermesPersistentVideoCache.debugSnapshot().entries.length") == 0,
+            "denied retarget must invalidate the former resource partition",
+        )
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", retarget_denied)
+
+        page.evaluate("() => fetch('/test/retarget?value=first').then(r=>r.text())")
+        retarget_again = page.evaluate_handle(
+            video_script(retarget_url, offscreen=True, activate=True)
+        )
+        wait_state(page, retarget_again, "ready")
+        require(
+            counts(page)["requests"].get("retarget") == 2,
+            "A must be fetched again after the denied retarget invalidated its partition",
+        )
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", retarget_again)
+
+        page.evaluate("() => fetch('/test/retarget?value=mismatch').then(r=>r.text())")
+        retarget_mismatch = page.evaluate_handle(
+            video_script(retarget_url, offscreen=True, activate=True)
+        )
+        wait_state(page, retarget_mismatch, "fallback")
+        require(
+            not page.evaluate("v => v.src.startsWith('blob:')", retarget_mismatch),
+            "allowed B without A's digest binding must not attach cached A",
+        )
+        require(
+            page.evaluate("HermesPersistentVideoCache.debugSnapshot().entries.length") == 0,
+            "binding-mismatch retarget must leave no reusable A entry",
+        )
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", retarget_mismatch)
+        page.evaluate("() => fetch('/test/retarget?value=first').then(r=>r.text())")
+
+        print("PHASE concurrent-digest-scope", flush=True)
+        page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
+        scope_race_path = "/tmp/scope-race.mp4"
+        scope_race_before = counts(page)["scope_requests"].get(scope_race_path, 0)
+        scope_race_a = page.evaluate_handle(
+            video_script(same_path_media_url("scope-race-a", 1800), offscreen=True, activate=True)
+        )
+        scope_race_b = page.evaluate_handle(
+            video_script(same_path_media_url("scope-race-b", 2200), offscreen=True, activate=True)
+        )
+        wait_state(page, scope_race_a, "ready")
+        wait_state(page, scope_race_b, "ready")
+        scope_race_counts = counts(page)
+        require(
+            scope_race_counts["scope_requests"].get(scope_race_path, 0)
+            == scope_race_before + 2,
+            "same path with different digests must receive independent scope authorization",
+        )
+        require(
+            scope_race_counts["requests"].get("scope-race-a") == 1
+            and scope_race_counts["requests"].get("scope-race-b") == 1,
+            "same-path distinct digests must not share the first resource task",
+        )
+        require(
+            len(page.evaluate("HermesPersistentVideoCache.debugSnapshot().entries")) == 2,
+            "same-path distinct digests must persist as separate resource fingerprints",
+        )
+        page.evaluate("([a,b]) => { a.closest('.msg-media-editor').remove(); b.closest('.msg-media-editor').remove(); }", [scope_race_a, scope_race_b])
 
         print("PHASE concurrent", flush=True)
         # A late consumer joins the same in-flight task, immediately inherits
@@ -473,18 +632,19 @@ def run(base: str, artifact_dir: Path) -> None:
         require(page.evaluate("([v,old]) => v.dataset.cacheBlobUrl !== old", [reused, old_blob]), "same-node replacement must own a new Blob URL")
 
         print("PHASE unknown-oversize", flush=True)
+        page.evaluate("HermesPersistentVideoCache.clearAll()")
         # Unknown length is counted while streaming; oversize never enters cache.
         unknown_case = "slow-unknown-oversize"
         unknown = page.evaluate_handle(video_script(media_url(unknown_case, 5000), offscreen=True, activate=True))
         wait_state(page, unknown, "fallback")
         wait_aborted(page, unknown_case, timeout=10000)
         snap = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
-        require(all(unknown_case not in key for key in snap["entries"]), "unknown oversize response must not be cached")
+        require(snap["entries"] == [], "unknown oversize response must not be cached")
         declared = page.evaluate_handle(video_script(media_url("declared-oversize", 5000)))
         page.evaluate("v => v.dispatchEvent(new Event('play'))", declared)
         wait_state(page, declared, "fallback")
         snap = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
-        require(all("declared-oversize" not in key for key in snap["entries"]), "declared oversize response must not be cached")
+        require(snap["entries"] == [], "declared oversize response must not be cached")
         live = page.evaluate_handle(video_script(media_url("live-fallback", 1800)))
         page.evaluate("v => v.dispatchEvent(new Event('play'))", live)
         wait_state(page, live, "fallback")
@@ -494,6 +654,26 @@ def run(base: str, artifact_dir: Path) -> None:
         require(counts(page)["requests"].get("live-fallback") == 2, "unattested live fallback bytes must never enter persistent cache")
         snap = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
         require(snap["tasks"] == 0, f"error/fallback must not retain a task: {snap}")
+
+        print("PHASE body-attestation", flush=True)
+        page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
+        wrong_body = page.evaluate_handle(
+            video_script(media_url("wrong-body-right-header", 1800), offscreen=True, activate=True)
+        )
+        page.wait_for_function(
+            "v => ['fallback','integrity-error'].includes(v.dataset.persistentVideoState)",
+            arg=wrong_body,
+        )
+        wrong_snapshot = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
+        require(wrong_snapshot["entries"] == [], f"wrong body/right header entered Cache Storage: {wrong_snapshot}")
+        require(
+            page.evaluate("v => v.dataset.persistentVideoState === 'integrity-error'", wrong_body),
+            "wrong body/right header must fail closed instead of entering native fallback",
+        )
+        require(
+            page.evaluate("v => !v.hasAttribute('src') && !v.src.startsWith('blob:')", wrong_body),
+            "wrong body/right header must never be attached or played",
+        )
 
         print("PHASE header-rejection-abort", flush=True)
         page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
@@ -528,7 +708,7 @@ def run(base: str, artifact_dir: Path) -> None:
             wait_aborted(page, case)
             snapshot = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
             require(snapshot["tasks"] == 0 and snapshot["consumers"] == 0, f"rejected response leaked registry state: {case} {snapshot}")
-            require(all(case not in key for key in snapshot["entries"]), f"rejected response entered Cache Storage: {case} {snapshot}")
+            require(snapshot["entries"] == [], f"rejected response entered Cache Storage: {case} {snapshot}")
             page.evaluate("v => v.closest('.msg-media-editor').remove()", rejected)
             if case == "slow-reject-invalid-length":
                 page.evaluate("window.__restoreRejectFetch()")
@@ -545,7 +725,11 @@ def run(base: str, artifact_dir: Path) -> None:
             page.evaluate("v => v.closest('.msg-media-editor').remove()", v)
         snap = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
         require(snap["totalBytes"] <= 5000, f"global byte quota must be enforced: {snap}")
-        require(len(snap["entries"]) == 1 and "lru-c" in snap["entries"][0], "LRU must retain the newest fitting entry")
+        require(
+            len(snap["entries"]) == 1
+            and snap["entries"][0].endswith(resource_fingerprint("lru-c", 2700)),
+            "LRU must retain the newest fitting entry",
+        )
 
         # A real QuotaExceededError evicts LRU data and retries exactly once.
         page.evaluate("HermesPersistentVideoCache.clearAll()")
@@ -555,7 +739,7 @@ def run(base: str, artifact_dir: Path) -> None:
         page.evaluate("v => v.closest('.msg-media-editor').remove()", old)
         page.evaluate("""async () => {
           const s=HermesPersistentVideoCache.debugSnapshot();
-          const cache=await caches.open('hermes-snapshot-video-v1-'+s.scope);
+          const cache=await caches.open('hermes-snapshot-video-v2-'+s.scope);
           const proto=Object.getPrototypeOf(cache);
           const original=proto.put;
           let thrown=false;
@@ -574,7 +758,11 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_state(page, fresh, "ready")
         page.evaluate("window.__restoreCachePut()")
         snap = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
-        require(len(snap["entries"]) == 1 and "quota-new" in snap["entries"][0], f"quota retry must retain only the new entry: {snap}")
+        require(
+            len(snap["entries"]) == 1
+            and snap["entries"][0].endswith(resource_fingerprint("quota-new", 1800)),
+            f"quota retry must retain only the new entry: {snap}",
+        )
 
         # Crash reconciliation repairs an orphan body plus dangling metadata.
         page.evaluate("HermesPersistentVideoCache.clearAll()")
@@ -583,17 +771,22 @@ def run(base: str, artifact_dir: Path) -> None:
         orphan_url = media_url("crash-orphan", 1800)
         page.evaluate("""async (url) => {
           const s=HermesPersistentVideoCache.debugSnapshot();
-          const cache=await caches.open('hermes-snapshot-video-v1-'+s.scope);
+          const cache=await caches.open('hermes-snapshot-video-v2-'+s.scope);
           for(const request of await cache.keys()) await cache.delete(request);
+          const source=new URL(url,location.href);
+          const endpoint=new URL('/api/media-cache/scope',location.origin);
+          for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+          const authorization=await fetch(endpoint).then(r=>r.json());
+          const key=location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
           const response=await fetch(url);
-          await cache.put(url,response);
+          await cache.put(key,response);
           await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries:{[location.origin+'/dangling']:{size:99,at:1}}}),{headers:{'Content-Type':'application/json'}}));
         }""", orphan_url)
         orphan = page.evaluate_handle(video_script(orphan_url))
         page.evaluate("v => v.dispatchEvent(new Event('play'))", orphan)
         wait_state(page, orphan, "ready")
         snap = page.evaluate("HermesPersistentVideoCache.debugSnapshot()")
-        require(len(snap["entries"]) == 1 and "crash-orphan" in snap["entries"][0], f"crash reconciliation must match actual cache bodies: {snap}")
+        require(len(snap["entries"]) == 1, f"crash reconciliation must retain exactly the authorized orphan body: {snap}")
         require(not counts(page)["requests"].get("crash-orphan"), "reconciled orphan body must be a cache hit")
 
         # A crash can leave an existing metadata row with the previous body's
@@ -606,26 +799,34 @@ def run(base: str, artifact_dir: Path) -> None:
         stale_b = media_url("stale-size-b", 3000)
         page.evaluate("""async ([a,b]) => {
           const s=HermesPersistentVideoCache.debugSnapshot();
-          const cache=await caches.open('hermes-snapshot-video-v1-'+s.scope);
+          const cache=await caches.open('hermes-snapshot-video-v2-'+s.scope);
           for(const request of await cache.keys()) await cache.delete(request);
-          const [ra,rb]=await Promise.all([fetch(a),fetch(b)]);
-          await cache.put(a,ra);
-          await cache.put(b,rb);
+          const keyFor=async url=>{
+            const source=new URL(url,location.href);
+            const endpoint=new URL('/api/media-cache/scope',location.origin);
+            for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+            const authorization=await fetch(endpoint).then(r=>r.json());
+            return location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
+          };
+          const [ra,rb,ca,cb]=await Promise.all([fetch(a),fetch(b),keyFor(a),keyFor(b)]);
+          await cache.put(ca,ra);
+          await cache.put(cb,rb);
+          window.__staleExpected=cb;
           const entries={};
-          entries[new URL(a,location.href).href]={size:1,at:1};
-          entries[new URL(b,location.href).href]={size:1,at:2};
+          entries[ca]={size:1,at:1};
+          entries[cb]={size:1,at:2};
           await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries}),{headers:{'Content-Type':'application/json'}}));
         }""", [stale_a, stale_b])
         stale = page.evaluate_handle(video_script(stale_b, offscreen=True, activate=True))
         wait_state(page, stale, "ready")
         actual = page.evaluate("""async () => {
           const s=HermesPersistentVideoCache.debugSnapshot();
-          const cache=await caches.open('hermes-snapshot-video-v1-'+s.scope);
+          const cache=await caches.open('hermes-snapshot-video-v2-'+s.scope);
           const bodies=(await cache.keys()).map(r=>r.url).filter(k=>!k.includes('__hermes_snapshot_video_cache_meta__'));
-          return {bodies,snapshot:s};
+          return {bodies,snapshot:s,expected:window.__staleExpected};
         }""")
         require(actual["snapshot"]["totalBytes"] <= 5000, f"stale metadata size bypassed global quota: {actual}")
-        require(len(actual["bodies"]) == 1 and "stale-size-b" in actual["bodies"][0], f"stale-size reconciliation must evict the older body: {actual}")
+        require(len(actual["bodies"]) == 1 and actual["bodies"][0] == actual["expected"], f"stale-size reconciliation must evict the older body: {actual}")
 
         print("PHASE authority", flush=True)
         # Authority transition clears old bytes before new-scope reads.
@@ -634,7 +835,7 @@ def run(base: str, artifact_dir: Path) -> None:
         require(snap["scope"] == "" and snap["entries"] == [], "authority change must clear old-scope entries before another read")
         authority_probe = page.evaluate_handle(video_script(media_url("authority-probe", 1800), offscreen=True, activate=True))
         wait_state(page, authority_probe, "ready")
-        require(page.evaluate("HermesPersistentVideoCache.debugSnapshot().scope") == "scope-b-session-a", "next read must enter the new session-authority scope")
+        require(page.evaluate("HermesPersistentVideoCache.debugSnapshot().scope") == "scope-b", "next read must enter the new authority scope")
         page.evaluate("caches.open('hermes-snapshot-video-v0-stale').then(c => c.put('/stale',new Response('old')))")
         page.evaluate("HermesPersistentVideoCache.authorityChanged()")
         cache_names = page.evaluate("caches.keys()")
@@ -666,7 +867,7 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_state(peer, right, "ready")
         actual = page.evaluate("""async () => {
           const s=HermesPersistentVideoCache.debugSnapshot();
-          const cache=await caches.open('hermes-snapshot-video-v1-'+s.scope);
+          const cache=await caches.open('hermes-snapshot-video-v2-'+s.scope);
           const keys=(await cache.keys()).map(r=>r.url);
           const meta=await cache.match(location.origin+'/__hermes_snapshot_video_cache_meta__').then(r=>r.json());
           const bodies=keys.filter(k=>!k.includes('__hermes_snapshot_video_cache_meta__'));

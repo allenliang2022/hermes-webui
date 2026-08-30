@@ -104,10 +104,13 @@ python tests/browser_persistent_video_cache.py
 
 The gate covers production `media-cache.js` → `ui.js` script order and
 `_mediaPlayerHtml()` integration with real session-authorized URLs, native Range fallback, first fetch versus
-cached replay/reload, server-attested snapshot-only persistence, per-file and
+cached replay/reload, exact captured-byte and browser-Blob snapshot attestation,
+fail-closed wrong-body/right-header rejection (neither playback nor persistence),
+canonical-path retarget denial and digest-binding mismatch fallback, per-file and
 global byte limits, LRU and real quota errors, auth-scope rotation, two-phase
 cross-tab authority clearing, profile/build/cache version clearing, unknown and
-declared oversize responses, same-tab deduplication, late subscribers, cross-tab
+declared oversize responses, same-tab deduplication, A → B → A chat-switch reuse
+with per-consumption path-and-digest reauthorization, late subscribers, cross-tab
 quota serialization, crash reconciliation, DOM and same-node replacement,
 response-header rejection aborts, pagehide/final-consumer abort, persisted
 pageshow recovery, Blob playback-error fallback, progress cleanup, object-URL

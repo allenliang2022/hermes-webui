@@ -179,6 +179,36 @@ def test_capture_snapshot_dedupes_identical_content(snap_dir, tmp_path):
     assert len(list(snap_dir.glob("*.snap"))) == 1
 
 
+def test_capture_snapshot_repairs_corrupt_existing_object(snap_dir, tmp_path):
+    """A digest-shaped filename is not proof that the existing bytes match."""
+    import hashlib
+
+    from api.media_snapshots import capture_snapshot
+
+    source = tmp_path / "source.mp4"
+    expected = b"verified-snapshot-bytes"
+    source.write_bytes(expected)
+    digest = hashlib.sha256(expected).hexdigest()
+    corrupt = snap_dir / f"{digest}.snap"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(b"wrong-existing-bytes")
+
+    assert capture_snapshot(source) == digest
+    assert corrupt.read_bytes() == expected
+
+
+def test_snapshot_path_for_digest_rejects_tampered_named_object(snap_dir, tmp_path):
+    from api.media_snapshots import capture_snapshot, snapshot_path_for_digest
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"original-bytes")
+    digest = capture_snapshot(source)
+    assert digest
+    (snap_dir / f"{digest}.snap").write_bytes(b"tampered-bytes")
+
+    assert snapshot_path_for_digest(digest) is None
+
+
 def test_capture_snapshot_skips_missing_and_over_cap(snap_dir, tmp_path):
     from api.media_snapshots import capture_snapshot
 
@@ -333,6 +363,54 @@ def test_handle_media_missing_snap_falls_back_to_live(routes, monkeypatch, snap_
     )
     assert missing.status == 200
     assert bytes(missing.body) == b"live-bytes"
+
+
+def test_handle_media_tampered_snapshot_falls_back_without_attestation(
+    routes, monkeypatch, snap_dir, tmp_path
+):
+    from api.media_snapshots import capture_snapshot
+
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"snapshot-v1")
+    digest = capture_snapshot(target)
+    assert digest
+    (snap_dir / f"{digest}.snap").write_bytes(b"wrong-body")
+    target.write_bytes(b"live-v2")
+
+    served = _media_get(routes, monkeypatch, target, query_extra=f"&snap={digest}")
+
+    assert served.status == 200
+    assert bytes(served.body) == b"live-v2"
+    assert not served.header("X-Hermes-Media-Snapshot")
+
+
+def test_handle_media_serves_the_bytes_verified_before_attestation(
+    routes, monkeypatch, snap_dir, tmp_path
+):
+    """An in-place rewrite after hashing cannot change the attested body."""
+    from api.media_snapshots import capture_snapshot
+
+    target = tmp_path / "clip.mp4"
+    expected = b"verified-snapshot"
+    replacement = b"tampered-snapshot"
+    assert len(expected) == len(replacement)
+    target.write_bytes(expected)
+    digest = capture_snapshot(target)
+    assert digest
+    snapshot = snap_dir / f"{digest}.snap"
+    original_open = routes._open_verified_snapshot_fd
+
+    def rewrite_after_verify(*args, **kwargs):
+        opened = original_open(*args, **kwargs)
+        snapshot.write_bytes(replacement)
+        return opened
+
+    monkeypatch.setattr(routes, "_open_verified_snapshot_fd", rewrite_after_verify)
+    served = _media_get(routes, monkeypatch, target, query_extra=f"&snap={digest}")
+
+    assert served.status == 200
+    assert bytes(served.body) == expected
+    assert served.header("X-Hermes-Media-Snapshot") == digest
 
 
 def test_handle_media_snap_does_not_bypass_deny(routes, monkeypatch, snap_dir, tmp_path):

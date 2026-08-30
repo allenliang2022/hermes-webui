@@ -662,7 +662,6 @@ def build_media_cache_scope(
     *,
     profile_name: str | None = None,
     workspace_path: str | None = None,
-    cache_context: str = "",
 ) -> str | None:
     """Return an opaque browser-cache partition for the current authority.
 
@@ -703,8 +702,20 @@ def build_media_cache_scope(
         build_version = str(WEBUI_VERSION or 'unknown')
     except Exception:
         build_version = 'unknown'
-    context = str(cache_context or '').strip()
-    material = f'media-cache:v1:{build_version}:{authority}:{profile}:{workspace}:{media_roots_policy}:{context}'.encode('utf-8')
+    material = f'media-cache:v2:{build_version}:{authority}:{profile}:{workspace}:{media_roots_policy}'.encode('utf-8')
+    return hmac.new(_signing_key(), material, hashlib.sha256).hexdigest()
+
+
+def build_media_cache_resource(target: Path, digest: str) -> str:
+    """Return an opaque identity for one canonical snapshot-backed resource.
+
+    This deliberately excludes the browser authority/profile partition created
+    by :func:`build_media_cache_scope`. The cache name carries that authority;
+    this HMAC identifies only the canonical target plus immutable byte digest,
+    so a raw path that later resolves elsewhere cannot select the old entry.
+    """
+    canonical = os.path.normcase(str(Path(target).resolve()))
+    material = f"media-cache-resource:v2:{canonical}\0{str(digest).lower()}".encode("utf-8")
     return hmac.new(_signing_key(), material, hashlib.sha256).hexdigest()
 
 

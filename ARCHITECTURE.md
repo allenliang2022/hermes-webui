@@ -115,20 +115,35 @@ State directory (runtime data, separate from source):
 
 ### Browser-persistent snapshot video cache
 
-Only same-origin `/api/media` video URLs with a 64-hex `snap` digest and no
-session-scoped authorization token are eligible. The media response must also attest the exact served snapshot through
-`X-Hermes-Media-Snapshot`; the route's normal missing/evicted-snapshot fallback
-to live bytes is never persisted.
+Only same-origin `/api/media` video URLs with a concrete conversation session,
+canonical media path, and 64-hex `snap` digest are eligible. The session authorizes
+each path consumption but is not part of the persistent resource identity. Before
+persistence, the server hashes and captures one immutable byte observation from the
+opened snapshot file descriptor, serves that captured observation with
+`X-Hermes-Media-Snapshot`, and the browser independently hashes the bounded Blob.
+A missing snapshot or canonical binding failure may use the ordinary live-file
+fallback, which is never persisted. A response whose attested body fails the browser
+digest check is rejected fail-closed: those bytes are neither played nor cached.
 
 `GET /api/media-cache/scope` returns an opaque HMAC partition derived from the
 verified WebUI auth session (or the installation-local no-auth authority), the
-request-resolved profile, exact media-authorizing session ID and its canonical
-workspace, plus the WebUI build version and cache schema. The scope endpoint
+request-resolved profile and canonical workspace, plus the WebUI build version
+and cache schema. The conversation session ID is deliberately not part of the
+persistent partition: it authorizes the exact path before every read, while the
+immutable path+snapshot cache key can be reused across chats in the same authority.
+The schema-v2 scope endpoint
 rejects a missing, deleted, or foreign-profile session and re-runs the existing
-session-media authorization for the exact canonical path before every new cache
-consumption. Concurrent validation is deduplicated only for the same
-session-and-path pair; different paths must each reach the server. Profile and
-workspace switches broadcast both a pre-mutation clear
+session-media authorization for the exact canonical path and requested snapshot
+digest before every new cache consumption. It shares the immutable-video
+eligibility chokepoint with `/api/media`: hard deny, video MIME, verified snapshot
+bytes, and exact canonical path-to-digest binding must all pass. On success the
+server returns the authority scope separately from an opaque resource fingerprint
+bound to the canonical target and digest. Cache, task, and metadata keys use that
+fingerprint rather than the raw request URL. Concurrent validation is deduplicated
+only for the same session, path, and digest; different resources must each reach
+the server. Switching chat A → B → A therefore reuses the same authorized
+snapshot bytes without granting a retargeted raw path access to the old entry.
+Profile and workspace switches broadcast both a pre-mutation clear
 and a post-mutation clear so another tab cannot finish old-authority work started
 inside the transition window. Sign-out does the same around server-side session
 invalidation; 401 redirects, authority rotation, build updates, and schema

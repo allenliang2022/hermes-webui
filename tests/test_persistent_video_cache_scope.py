@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
 
 
-def test_scope_is_opaque_stable_and_bound_to_session_and_profile(monkeypatch):
+def test_scope_is_opaque_stable_and_bound_to_authority_and_profile(monkeypatch):
     from api import auth
 
     monkeypatch.setattr(auth, "_signing_key", lambda: b"test-signing-key")
@@ -55,11 +55,12 @@ def test_scope_is_opaque_stable_and_bound_to_session_and_profile(monkeypatch):
     assert a_default != a_named
     assert a_default != b_default
     assert a_default != auth.build_media_cache_scope(a, profile_name="default", workspace_path="/workspace/b")
-    assert a_default != auth.build_media_cache_scope(
+    # Conversation session IDs authorize individual paths per read; they are
+    # not a persistent identity boundary inside one auth/profile/workspace.
+    assert a_default == auth.build_media_cache_scope(
         a,
         profile_name="default",
         workspace_path="/workspace/a",
-        cache_context="session:other",
     )
     assert "session-a" not in a_default
     assert "default" not in a_default
@@ -122,8 +123,9 @@ def test_scope_fails_closed_for_missing_or_invalid_authenticated_session(monkeyp
     assert auth.build_media_cache_scope(SimpleNamespace(headers={}), profile_name="default") is None
 
 
-def test_media_cache_scope_route_returns_no_store_opaque_payload(monkeypatch):
+def test_media_cache_scope_route_returns_no_store_opaque_payload(monkeypatch, tmp_path):
     from api import auth, routes
+    from api.media_snapshots import capture_snapshot
 
     seen = {}
 
@@ -131,21 +133,137 @@ def test_media_cache_scope_route_returns_no_store_opaque_payload(monkeypatch):
         seen.update(kwargs)
         return "f" * 64
 
-    session = SimpleNamespace(profile="named", workspace="/workspace/named")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"snapshot-video")
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    digest = capture_snapshot(clip)
+    assert digest
+    session = SimpleNamespace(profile="named", workspace=str(tmp_path))
     monkeypatch.setattr(auth, "build_media_cache_scope", build)
     monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
     monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda profile, handler=None: profile == "named")
     monkeypatch.setattr(routes, "_session_media_token_allows_path", lambda sid, path, types: sid == "session-a" and path.name == "clip.mp4")
     handler = Handler()
-    routes.handle_get(handler, SimpleNamespace(path="/api/media-cache/scope", query="session_id=session-a&path=/workspace/named/clip.mp4"))
+    routes.handle_get(
+        handler,
+        SimpleNamespace(
+            path="/api/media-cache/scope",
+            query=urllib.parse.urlencode(
+                {"session_id": "session-a", "path": str(clip), "snap": digest}
+            ),
+        ),
+    )
 
     assert handler.status == 200
     payload = json.loads(bytes(handler.body))
-    assert payload == {"scope": "f" * 64, "schema": 1}
+    assert payload["scope"] == "f" * 64
+    assert payload["schema"] == 2
+    assert len(payload["resource"]) == 64
+    assert str(clip) not in payload["resource"]
     assert ("Cache-Control", "no-store") in handler.sent_headers
     assert seen["profile_name"] == "named"
-    assert seen["cache_context"] == "session:session-a"
-    assert seen["workspace_path"].replace("\\", "/").endswith("/workspace/named")
+    assert "cache_context" not in seen
+    assert seen["workspace_path"].replace("\\", "/").endswith(tmp_path.name)
+
+
+def test_media_cache_resource_is_opaque_and_binds_canonical_target(monkeypatch, tmp_path):
+    from api import auth
+
+    monkeypatch.setattr(auth, "_signing_key", lambda: b"resource-test-key")
+    digest = "a" * 64
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+
+    first_resource = auth.build_media_cache_resource(first, digest)
+    second_resource = auth.build_media_cache_resource(second, digest)
+
+    assert len(first_resource) == 64
+    assert first_resource != second_resource
+    assert str(first) not in first_resource
+
+
+def test_media_cache_scope_rejects_server_denied_snapshot(monkeypatch, tmp_path):
+    from api import auth, routes
+    from api.media_snapshots import capture_snapshot
+
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"snapshot-video")
+    digest = capture_snapshot(target)
+    assert digest
+    session = SimpleNamespace(profile="named", workspace=str(tmp_path))
+    monkeypatch.setattr(auth, "build_media_cache_scope", lambda *_a, **_k: "f" * 64)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "_session_media_token_allows_path", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "_media_deny_reason", lambda _target: "denied by server")
+
+    denied = Handler()
+    routes.handle_get(
+        denied,
+        SimpleNamespace(
+            path="/api/media-cache/scope",
+            query=urllib.parse.urlencode(
+                {"session_id": "session-a", "path": str(target), "snap": digest}
+            ),
+        ),
+    )
+
+    assert denied.status == 404
+    assert b"resource" not in bytes(denied.body)
+
+
+def test_media_cache_scope_rejects_retargeted_path_without_digest_binding(
+    monkeypatch, tmp_path
+):
+    from api import auth, routes
+    from api.media_snapshots import capture_snapshot
+
+    store = tmp_path / "snapshots"
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    alias = tmp_path / "alias.mp4"
+    first.write_bytes(b"first-snapshot")
+    second.write_bytes(b"second-live")
+    try:
+        alias.symlink_to(first)
+    except OSError as exc:
+        import pytest
+
+        pytest.skip(f"symlink unavailable: {exc}")
+    digest = capture_snapshot(first)
+    assert digest
+
+    session = SimpleNamespace(profile="named", workspace=str(tmp_path))
+    monkeypatch.setattr(auth, "build_media_cache_scope", lambda *_a, **_k: "f" * 64)
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "_session_media_token_allows_path", lambda *_a, **_k: True)
+
+    def request():
+        handler = Handler()
+        routes.handle_get(
+            handler,
+            SimpleNamespace(
+                path="/api/media-cache/scope",
+                query=urllib.parse.urlencode(
+                    {"session_id": "session-a", "path": str(alias), "snap": digest}
+                ),
+            ),
+        )
+        return handler
+
+    initial = request()
+    assert initial.status == 200
+    initial_resource = json.loads(bytes(initial.body))["resource"]
+
+    alias.unlink()
+    alias.symlink_to(second)
+    retargeted = request()
+
+    assert retargeted.status == 404
+    assert initial_resource not in bytes(retargeted.body).decode("utf-8")
 
 
 def test_media_cache_scope_route_rejects_missing_or_foreign_session(monkeypatch):
@@ -158,14 +276,32 @@ def test_media_cache_scope_route_rejects_missing_or_foreign_session(monkeypatch)
     monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: SimpleNamespace(profile="other", workspace="/workspace/other"))
     monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda _profile, handler=None: False)
     foreign = Handler()
-    routes.handle_get(foreign, SimpleNamespace(path="/api/media-cache/scope", query="session_id=foreign&path=/workspace/other/clip.mp4"))
+    routes.handle_get(
+        foreign,
+        SimpleNamespace(
+            path="/api/media-cache/scope",
+            query=(
+                "session_id=foreign&path=/workspace/other/clip.mp4&snap="
+                + "0" * 64
+            ),
+        ),
+    )
     assert foreign.status == 404
     assert ("Cache-Control", "no-store") in foreign.sent_headers
 
     monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda _profile, handler=None: True)
     monkeypatch.setattr(routes, "_session_media_token_allows_path", lambda _sid, _path, _types: False)
     revoked = Handler()
-    routes.handle_get(revoked, SimpleNamespace(path="/api/media-cache/scope", query="session_id=session-a&path=/workspace/named/clip.mp4"))
+    routes.handle_get(
+        revoked,
+        SimpleNamespace(
+            path="/api/media-cache/scope",
+            query=(
+                "session_id=session-a&path=/workspace/named/clip.mp4&snap="
+                + "0" * 64
+            ),
+        ),
+    )
     assert revoked.status == 404
 
 

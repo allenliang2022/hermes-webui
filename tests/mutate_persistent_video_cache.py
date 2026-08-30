@@ -25,10 +25,40 @@ MUTATIONS = {
             "if(sessionId) return '';",
         ),
     ],
-    "drop-path-scope-key": [
+    "drop-snapshot-from-scope-key": [
         (
-            "return String(url.searchParams.get('session_id')||'')+'\\n'+String(url.searchParams.get('path')||'');",
-            "return String(url.searchParams.get('session_id')||'');",
+            "      String(url.searchParams.get('path')||'')+'\\n'+\n      String(url.searchParams.get('snap')||'').toLowerCase();",
+            "      String(url.searchParams.get('path')||'');",
+        ),
+    ],
+    "cache-by-raw-url": [
+        (
+            "const cacheKey=_cacheKey(authorization&&authorization.resource);",
+            "const cacheKey=new URL(sourceUrl,document.baseURI||location.href).href;",
+        ),
+    ],
+    "drop-resource-body-digest": [
+        (
+            "if(await _blobDigest(blob)!==requestedDigest.toLowerCase()){",
+            "if(false){",
+        ),
+    ],
+    "degrade-integrity-error-to-fallback": [
+        (
+            "throw new MediaCacheIntegrityError('media response bytes did not match snapshot digest');",
+            "throw new Error('media response bytes did not match snapshot digest');",
+        ),
+    ],
+    "drop-snapshot-from-scope-request": [
+        (
+            "endpoint.searchParams.set('snap',String(mediaUrl.searchParams.get('snap')||'').toLowerCase());",
+            "void mediaUrl.searchParams.get('snap');",
+        ),
+    ],
+    "release-scope-waiter-on-deny": [
+        (
+            "await clearAll(true,scopeWaiters);",
+            "await clearAll();",
         ),
     ],
     "drop-rejected-response-cancel": [
